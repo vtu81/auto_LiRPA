@@ -133,7 +133,12 @@ class PerturbationLpNorm(Perturbation):
                 diff = (x_U - x_L) / 2.0
                 if not A.identity == 1:
                     # unfold the input as [batch_size, L, in_c * H * W]
-                    unfold_input = F.unfold(center, kernel_size=A.patches.size(-1), padding = A.padding, stride = A.stride).transpose(-2, -1)
+                    if isinstance(A.padding, tuple) and len(A.padding) == 4:
+                        # Asymmetric padding.
+                        padded_center = F.pad(center, A.padding)
+                        unfold_input = F.unfold(padded_center, kernel_size=A.patches.size(-1), padding = 0, stride = A.stride).transpose(-2, -1)
+                    else:
+                        unfold_input = F.unfold(center, kernel_size=A.patches.size(-1), padding = A.padding, stride = A.stride).transpose(-2, -1)
                     # reshape the input as [batch_size, L, 1, in_c, H, W]
                     unfold_input = unfold_input.view(unfold_input.size(0), unfold_input.size(1), -1, A.patches.size(-3), A.patches.size(-2), A.patches.size(-1))
                     prod = unfold_input * A.patches
@@ -141,7 +146,12 @@ class PerturbationLpNorm(Perturbation):
                     # size of prod: [batch_size, out_c, L], and then reshape it to [batch_size, out_c, M, M]
                     bound = prod.view(prod.size(0), prod.size(1), int(math.sqrt(prod.size(2))), int(math.sqrt(prod.size(2))))
  
-                    unfold_input = F.unfold(diff, kernel_size=A.patches.size(-1), padding = A.padding, stride = A.stride).transpose(-2, -1)
+                    if isinstance(A.padding, tuple) and len(A.padding) == 4:
+                        # Asymmetric padding.
+                        padded_diff = F.pad(diff, A.padding)
+                        unfold_input = F.unfold(padded_diff, kernel_size=A.patches.size(-1), padding = 0, stride = A.stride).transpose(-2, -1)
+                    else:
+                        unfold_input = F.unfold(diff, kernel_size=A.patches.size(-1), padding = A.padding, stride = A.stride).transpose(-2, -1)
                     unfold_input = unfold_input.view(unfold_input.size(0), unfold_input.size(1), -1, A.patches.size(-3), A.patches.size(-2), A.patches.size(-1))
                     prod = unfold_input * A.patches.abs()
                     prod = prod.sum((-1, -2, -3)).transpose(-2, -1)

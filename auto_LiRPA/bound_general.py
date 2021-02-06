@@ -14,7 +14,7 @@ from auto_LiRPA.utils import LinearBound, logger, eyeC, unpack_inputs, Patches, 
 
 class BoundedModule(nn.Module):
     def __init__(self, model, global_input, bound_opts={}, auto_batch_dim=True, device='auto',
-            verbose=False):
+                 verbose=False):
         super(BoundedModule, self).__init__()
         if isinstance(model, BoundedModule):
             for key in model.__dict__.keys():
@@ -40,10 +40,10 @@ class BoundedModule(nn.Module):
             opt = kwargs["method_opt"]
             kwargs.pop("method_opt")
         else:
-            opt = "forward" 
+            opt = "forward"
         for kwarg in [
-                'disable_multi_gpu', 'no_replicas', 'get_property', 
-                'node_class', 'att_name']:
+            'disable_multi_gpu', 'no_replicas', 'get_property',
+            'node_class', 'att_name']:
             if kwarg in kwargs:
                 kwargs.pop(kwarg)
         if opt == "compute_bounds":
@@ -141,6 +141,7 @@ class BoundedModule(nn.Module):
             inp = [forward_values[l_pre] for l_pre in l.input_name]
             for l_pre in l.input_name:
                 l.from_input = l.from_input or self._modules[l_pre].from_input
+
             fv = l.forward(*inp)
             if isinstance(fv, torch.Size) or isinstance(fv, tuple):
                 fv = torch.tensor(fv, device=self.device)
@@ -151,14 +152,18 @@ class BoundedModule(nn.Module):
                 inp_batch_dim = [self._modules[l_pre].batch_dim for l_pre in l.input_name]
                 try:
                     l.batch_dim = l.infer_batch_dim(self.init_batch_size, *inp_batch_dim)
-                    try: logger.debug('Batch dimension of ({})[{}]: fv shape {}, infered {}, input batch dimensions {}'.format(
-                        l, l.name, l.forward_value.shape, l.batch_dim, inp_batch_dim
-                    ))
-                    except: pass
+                    try:
+                        logger.debug(
+                            'Batch dimension of ({})[{}]: fv shape {}, infered {}, input batch dimensions {}'.format(
+                                l, l.name, l.forward_value.shape, l.batch_dim, inp_batch_dim
+                            ))
+                    except:
+                        pass
                 except:
-                    raise Exception('Fail to infer the batch dimension of ({})[{}]: fv shape {}, input batch dimensions {}'.format(
-                        l, l.name, l.forward_value.shape, inp_batch_dim
-                    ))
+                    raise Exception(
+                        'Fail to infer the batch dimension of ({})[{}]: fv shape {}, input batch dimensions {}'.format(
+                            l, l.name, l.forward_value.shape, inp_batch_dim
+                        ))
 
             if isinstance(l.forward_value, torch.Tensor):
                 l.default_shape = l.forward_value.shape
@@ -174,6 +179,7 @@ class BoundedModule(nn.Module):
             return forward_values[final_node_name]
         else:
             out = deque([forward_values[n] for n in self.output_name])
+
             def _fill_template(template):
                 if template is None:
                     return out.popleft()
@@ -189,9 +195,11 @@ class BoundedModule(nn.Module):
                     return res
                 else:
                     raise NotImplementedError
+
             return _fill_template(self.output_template)
 
     """Mark the graph nodes and determine which nodes need perturbation."""
+
     def _mark_perturbed_nodes(self):
         degree_in = {}
         queue = deque()
@@ -200,7 +208,7 @@ class BoundedModule(nn.Module):
             l = self._modules[key]
             degree_in[l.name] = len(l.input_name)
             if degree_in[l.name] == 0:
-                queue.append(l) #in_degree ==0 -> root node
+                queue.append(l)  # in_degree ==0 -> root node
 
         while len(queue) > 0:
             l = queue.popleft()
@@ -225,7 +233,7 @@ class BoundedModule(nn.Module):
             if hasattr(l, 'linear'):
                 if isinstance(l.linear, tuple):
                     for item in l.linear:
-                        del(item)
+                        del (item)
                 delattr(l, 'linear')
             for attr in ['forward_value', 'lower', 'upper', 'interval']:
                 if hasattr(l, attr):
@@ -316,10 +324,10 @@ class BoundedModule(nn.Module):
             if n.input_index is not None:
                 nodesIn[i] = nodesIn[i]._replace(bound_node=BoundInput(
                     nodesIn[i].inputs, nodesIn[i].name, nodesIn[i].ori_name,
-                    value=global_input_unpacked[nodesIn[i].input_index], 
+                    value=global_input_unpacked[nodesIn[i].input_index],
                     perturbation=nodesIn[i].perturbation))
             else:
-                bound_class = BoundBuffers if n.name in bn_nodes else BoundParams                    
+                bound_class = BoundBuffers if n.name in bn_nodes else BoundParams
                 nodesIn[i] = nodesIn[i]._replace(bound_node=bound_class(
                     nodesIn[i].inputs, nodesIn[i].name, nodesIn[i].ori_name,
                     value=nodesIn[i].param, perturbation=nodesIn[i].perturbation))
@@ -373,7 +381,7 @@ class BoundedModule(nn.Module):
         # When there are multiple output nodes, this seems to be the first output element.
         # In this case, we are assuming that we always aim to compute the bounds for the first
         # output element.
-        self.final_name = nodesOP[-1].name 
+        self.final_name = nodesOP[-1].name
         assert self.final_name == nodesOut[0]
         self.input_name, self.input_index, self.root_name = [], [], []
         for node in nodesIn:
@@ -427,12 +435,13 @@ class BoundedModule(nn.Module):
 
                 nodesOP = nodesOP[:n] + _nodesOP + nodesOP[(n + 1):]
                 nodesIn = nodesIn + _nodesIn[num_inputs:]
- 
+
                 break
 
         return nodesOP, nodesIn, found_complex
 
     """build a dict with {ori_name: name, name: ori_name}"""
+
     def _get_node_name_map(self, ):
         self.node_name_map = {}
         for node in self._modules.values():
@@ -462,7 +471,7 @@ class BoundedModule(nn.Module):
             self._build_graph(nodesOP, nodesIn, nodesOut, template)
             self.forward(*global_input)  # running means/vars changed
             nodesOP, nodesIn, found_complex = self._split_complex(nodesOP, nodesIn)
-            if not found_complex: 
+            if not found_complex:
                 break
 
         self._get_node_name_map()
@@ -471,6 +480,12 @@ class BoundedModule(nn.Module):
         self.load_state_dict(self.ori_state_dict)
         model.load_state_dict(self.ori_state_dict)
         delattr(self, 'ori_state_dict')
+
+        if self.bound_opts.get('relu') == "random_evaluation":
+            for m in reversed(self._modules.values()):
+                if isinstance(m, BoundRelu):
+                    m.slope = None
+                    m.beta = None
 
         # The final node used in the last time calling `compute_bounds`
         self.last_final_node = None
@@ -485,49 +500,158 @@ class BoundedModule(nn.Module):
         if self.verbose:
             logger.info('Model converted to support bounds')
 
-    def get_optimized_bounds(self, x=None, aux=None, C=None, IBP=False, forward=False, method='backward', bound_lower=True,
-                       bound_upper=True, reuse_ibp=False, return_A=False, final_node_name=None, average_A=False, new_interval=None, iteration=10):
-        if x is None:
-            output = self.forward(self.global_input)
-        else:
-            output = self.forward(x)
+    def set_relu_used_count(self, start_idx):
+        # print('start_idx', start_idx)
+        layer_idx = 0
+        relu_used = 0
+        for model in reversed(self._modules.values()):
+            if isinstance(model, BoundRelu):
+                layer_idx += 1
+                if relu_used < start_idx:
+                    relu_used += 1
+                # print('relu used', relu_used)
+                model.relu_used_count = relu_used  # or always = 1 if not using multiple alpha
 
+    def get_optimized_bounds(self, x=None, aux=None, C=None, IBP=False, forward=False, method='backward',
+                             bound_lower=True, bound_upper=False, reuse_ibp=False, return_A=False, final_node_name=None,
+                             average_A=False, new_interval=None, iteration=10, beta=False, alpha=True, early_stop=True,
+                             log=False, opt_choice="default", start_idx=99, decision_thresh=0, keep_best=True,
+                             update_by_layer=False, lr=0.1):
+
+        assert alpha or beta, "nothing to optimize, use compute bound instead!"
+        if not update_by_layer: start_idx = 99
+        self.set_relu_used_count(start_idx=start_idx)
+
+        # if x is None:
+        #     output = self.forward(self.global_input)
+        # else:
+        #     output = self.forward(x)
+
+        if opt_choice == "adam":
+            lr = 0.5 if iteration > 99 else lr
+            lr_beta = 0.05
+        else:
+            lr = 10 if iteration > 99 else lr
+            lr_beta = 0.05
+
+        alphas = []
+        betas = []
         parameters = []
         for model in self._modules.values():
             if isinstance(model, BoundRelu):
-                parameters.append(model.slope)
+                if alpha:
+                    alphas.append(model.slope)
 
-        lr = 10
-        opt = optim.SGD(parameters, lr=lr)
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=5, eta_min=0.1)
-        last_l = 1e8
+                if beta:
+                    # print(model.beta)
+                    betas.append(model.beta)
 
+        if alpha:
+            parameters.append({'params': alphas, 'lr': lr})
+            best_alphas = [s.clone().detach() for s in alphas]
+        if beta:
+            parameters.append({'params': betas, 'lr': lr_beta})
+            best_betas = [b.clone().detach() for b in betas]
+
+        if opt_choice == "adam":
+            opt = optim.Adam(parameters, lr=lr)
+        else:
+            opt = optim.SGD(parameters, lr=lr, momentum=0.9)
+
+        # scheduler = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=5, eta_min=0.1)
+        scheduler = optim.lr_scheduler.ExponentialLR(opt, 0.98)
+
+        # opt = optim.SGD(parameters, lr=lr, momentum=0.9)
+        last_l = torch.tensor(1e8).to(x[0].device)
+        best_l = torch.tensor(-1e8).to(x[0].device)
+
+        start = time.time()
         for i in range(iteration):
-            l, u = self.compute_bounds(x, aux, C, IBP, forward, method, bound_lower, bound_upper, reuse_ibp,
-                                       return_A=False, final_node_name=final_node_name, average_A=average_A, new_interval=new_interval)
+            l, _ = self.compute_bounds(x, aux, C, IBP, forward, method, bound_lower, bound_upper, reuse_ibp,
+                                       return_A=False, final_node_name=final_node_name, average_A=average_A,
+                                       new_interval=new_interval if update_by_layer else None)
             assert l.shape[1] == 1
+
             if i == 0 or i == iteration - 1:
-                print('optimal slope:', l.flatten(), scheduler.get_last_lr())
-                if (l > 1e-4).all():  # all lower bounds > 0, no need to optimize
+                # print('optimal slope has loss:', l.flatten(), scheduler.get_last_lr())
+                if (l > decision_thresh + 1e-4).all():  # all lower bounds > decision_thresh, no need to optimize
+                    print("all verified", decision_thresh)
                     break
 
+            current_lr = []
+            for param_group in opt.param_groups:
+                current_lr.append(param_group['lr'])
+            if log:
+                print("iters [", i, "] beta:", [p.sum().item() for p in betas], "l:", l.sum().item(), "lr:", current_lr)
+
+            l = (-1 * l) * (l < decision_thresh + 1e-4)  # only optimize the lower bounds < decision_thresh
             l = l.sum()
-            opt.zero_grad()
-            l = (-1 * l) * (l < 1e-4)  # only optimize the lower bounds < 0
             # early stop
-            if last_l <= l and iteration < 100:
+            if early_stop and (last_l <= l and iteration < 100):
+                print('early stop', i)
                 break
-            l.backward(retain_graph=True)
+
+            if keep_best:
+                if -l > best_l:
+                    best_l = -l
+                    if alpha: best_alphas = [s.clone().detach() for s in alphas]
+                    if beta: best_betas = [b.clone().detach() for b in betas]
+
+            opt.zero_grad()
+            l.backward()
+
             opt.step()
+
+            if beta:
+                # guarantee that beta are always >=0
+                for model in self._modules.values():
+                    if isinstance(model, BoundRelu):
+                        model.beta.data = (model.beta >= 0) * model.beta.data
+
+            if alpha:
+                for model in self._modules.values():
+                    if isinstance(model, BoundRelu):
+                        model.slope.data = torch.clamp(model.slope.data, 0., 1.)
+
+                # for alphaa in alphas:
+                #     print(alphaa, alphaa.grad, l)
+
             # record.append(l.detach().item())
-            if i > 5 or iteration < 100: scheduler.step()
+            # if opt_choice=="default" and (i > 5 or iteration < 100): scheduler.step()
+            scheduler.step()
 
             last_l = l.detach().clone()
+            self.set_relu_used_count(start_idx=start_idx)
+            # print(i, last_l)
+
+        if keep_best and not early_stop:
+            idx = 0
+            for model in self._modules.values():
+                if isinstance(model, BoundRelu):
+                    if alpha: model.slope.data = best_alphas[idx].data
+                    if beta: model.beta.data = best_betas[idx].data
+                    idx += 1
+
+        if new_interval is not None and not update_by_layer:
+            for l in self._modules.values():
+                if l.name in new_interval.keys() and hasattr(l, "lower"):
+                    # l.interval = tuple(new_interval[l.name][:2])
+                    l.lower = torch.max(l.lower, new_interval[l.name][0])
+                    l.upper = torch.min(l.upper, new_interval[l.name][1])
+                    if (l.lower > l.upper).any():
+                        print('infeasible!!!!!!!!!!!!!!', (l.lower > l.upper).sum())
+
+        print("best_l after optimization:", best_l.item(), "with beta sum per layer:", [p.sum().item() for p in betas])
         # np.save('solve_slope.npy', np.array(record))
-        return self.compute_bounds(x, aux, C, IBP, forward, method, bound_lower, bound_upper, reuse_ibp, return_A, final_node_name, average_A, new_interval)
+        print('optimal alpha/beta time:', time.time() - start)
+
+        self.set_relu_used_count(start_idx=1)  # set_relu_used_count for CROWN-IBP
+        # x = None to avoid clean node.lower
+        return self.compute_bounds(None, aux, C, IBP, forward, method, bound_lower, bound_upper, \
+                                   reuse_ibp, return_A, final_node_name, average_A, new_interval)
 
     def compute_bounds(self, x=None, aux=None, C=None, IBP=False, forward=False, method='backward', bound_lower=True,
-                       bound_upper=True, reuse_ibp=False, 
+                       bound_upper=True, reuse_ibp=False,
                        return_A=False, final_node_name=None, average_A=False, new_interval=None,
                        return_b=False, b_dict=None):
         if not bound_lower and not bound_upper:
@@ -572,7 +696,7 @@ class BoundedModule(nn.Module):
                     dim_in += root[i].dim
             else:
                 # This inpute/parameter does not has perturbation. Use plain tuple defaulting to Linf perturbation.
-                root[i].interval = (value, value)                
+                root[i].interval = (value, value)
                 root[i].lower = root[i].upper = value
 
         if forward:
@@ -620,12 +744,13 @@ class BoundedModule(nn.Module):
                         n_pre.used = True
                         queue.append(n_pre)
 
-        for i in self._modules.values(): # for all nodes
+        for i in self._modules.values():  # for all nodes
             if not i.used:
                 continue
-            if hasattr(i, 'nonlinear') and i.nonlinear: 
+            if hasattr(i, 'nonlinear') and i.nonlinear:
                 for l_name in i.input_name:
                     node = self._modules[l_name]
+                    # print('node', node, 'lower', hasattr(node, 'lower'), 'perturbed', node.perturbed, 'forward_value', hasattr(node, 'forward_value'), 'fv', hasattr(node, 'fv'), 'from_input', node.from_input)
                     if not hasattr(node, 'lower'):
                         if not node.perturbed and hasattr(node, 'forward_value'):
                             node.interval = node.lower, node.upper = \
@@ -641,7 +766,9 @@ class BoundedModule(nn.Module):
                                 node=node, root=root, dim_in=dim_in, concretize=True)
                         else:
                             # assign concretized bound for ReLU layer to save computational cost
-                            if (isinstance(node, BoundActivation) or isinstance(node, BoundTranspose)) and hasattr(self._modules[node.input_name[0]], 'lower'):
+                            # FIXME: Put ReLU after reshape will cause problem!
+                            if (isinstance(node, BoundActivation) or isinstance(node, BoundTranspose)) and hasattr(
+                                    self._modules[node.input_name[0]], 'lower'):
                                 node.lower = node.forward(self._modules[node.input_name[0]].lower)
                                 node.upper = node.forward(self._modules[node.input_name[0]].upper)
                             elif isinstance(node, BoundReshape) and \
@@ -665,24 +792,30 @@ class BoundedModule(nn.Module):
                                 if not flag:
                                     dim = int(np.prod(node.default_shape[1:]))
                                     # FIXME: C matrix shape incorrect for BoundParams.
-                                    if (isinstance(node, BoundLinear) or isinstance(node, BoundMatMul)) and int(os.environ.get('AUTOLIRPA_USE_FULL_C', 0)) == 0:
+                                    if (isinstance(node, BoundLinear) or isinstance(node, BoundMatMul)) and int(
+                                            os.environ.get('AUTOLIRPA_USE_FULL_C', 0)) == 0:
                                         newC = eyeC([batch_size, dim, *node.default_shape[1:]], self.device)
-                                    elif (isinstance(node, BoundConv) or isinstance(node, BoundBatchNormalization)) and node.mode == "patches":
+                                    elif (isinstance(node, BoundConv) or isinstance(node,
+                                                                                    BoundBatchNormalization)) and node.mode == "patches":
                                         # Here we create an Identity Patches object 
-                                        newC = Patches(None, 1, 0, [batch_size, node.default_shape[-2] * node.default_shape[-1], node.default_shape[-3], node.default_shape[-3], 1, 1], 1)
+                                        newC = Patches(None, 1, 0,
+                                                       [batch_size, node.default_shape[-2] * node.default_shape[-1],
+                                                        node.default_shape[-3], node.default_shape[-3], 1, 1], 1)
                                     elif isinstance(node, BoundAdd) and node.mode == "patches":
                                         num_channel = node.default_shape[-3]
-                                        patches = (torch.eye(num_channel, device=self.device)).unsqueeze(0).unsqueeze(0).unsqueeze(4).unsqueeze(5) # now [1 * 1 * in_C * in_C * 1 * 1]
+                                        patches = (torch.eye(num_channel, device=self.device)).unsqueeze(0).unsqueeze(
+                                            0).unsqueeze(4).unsqueeze(5)  # now [1 * 1 * in_C * in_C * 1 * 1]
                                         newC = Patches(patches, 1, 0, [batch_size] + list(patches.shape[1:]))
                                     else:
-                                        newC = torch.eye(dim, device=self.device)\
-                                            .unsqueeze(0).repeat(batch_size, 1, 1)\
+                                        newC = torch.eye(dim, device=self.device) \
+                                            .unsqueeze(0).repeat(batch_size, 1, 1) \
                                             .view(batch_size, dim, *node.default_shape[1:])
-                                    if return_A:
+                                    # print('Creating new C', type(newC), 'for', node)
+                                    if False:  # TODO: only return A_dict of final layer
                                         _, _, A_dict = self._backward_general(C=newC, node=node, root=root,
-                                                                            return_A=return_A, A_dict=A_dict)
+                                                                              return_A=return_A, A_dict=A_dict)
                                     else:
-                                        self._backward_general(C=newC, node=node, root=root, return_A=return_A)
+                                        self._backward_general(C=newC, node=node, root=root, return_A=False)
 
         if method == 'backward':
             return self._backward_general(C=C, node=final, root=root, bound_lower=bound_lower, bound_upper=bound_upper,
@@ -695,6 +828,7 @@ class BoundedModule(nn.Module):
 
     """ improvement on merging BoundLinear, BoundGatherElements and BoundSub
     when loss fusion is used in training"""
+
     def _IBP_loss_fusion(self, node, C):
         # not using loss fusion
         if not (isinstance(self.bound_opts, dict) and \
@@ -724,11 +858,11 @@ class BoundedModule(nn.Module):
                         labels = labels.lower
                         batch_size = labels.shape[0]
                         w = w.unsqueeze(0).repeat(batch_size, 1, 1)
-                        w = w - torch.gather(w, dim=1, 
-                            index=labels.unsqueeze(-1).repeat(1, w.shape[1], w.shape[2]))
+                        w = w - torch.gather(w, dim=1,
+                                             index=labels.unsqueeze(-1).repeat(1, w.shape[1], w.shape[2]))
                         b = b.unsqueeze(0).repeat(batch_size, 1)
                         b = b - torch.gather(b, dim=1,
-                            index=labels.repeat(1, b.shape[1]))
+                                             index=labels.repeat(1, b.shape[1]))
                         lower, upper = node_start.interval
                         lower, upper = lower.unsqueeze(1), upper.unsqueeze(1)
                         node.lower, node.upper = node_linear.interval_propagate(
@@ -740,11 +874,11 @@ class BoundedModule(nn.Module):
     def _IBP_general(self, node=None, C=None):
         if hasattr(node, 'interval'):
             return node.interval
-            
+
         if not node.perturbed and hasattr(node, 'forward_value'):
             node.interval = node.lower, node.upper = node.forward_value, node.forward_value
             return node.interval
-            
+
         logger.debug('IBP at {}[{}]'.format(node, node.name))
 
         interval = self._IBP_loss_fusion(node, C)
@@ -777,8 +911,8 @@ class BoundedModule(nn.Module):
 
         return node.interval
 
-    def _backward_general(self, C=None, node=None, root=None, bound_lower=True, bound_upper=True, 
-            return_A=False, average_A=False, A_dict=None, return_b=False, b_dict=None):
+    def _backward_general(self, C=None, node=None, root=None, bound_lower=True, bound_upper=True,
+                          return_A=False, average_A=False, A_dict=None, return_b=False, b_dict=None):
         logger.debug('Backward from ({})[{}]'.format(node, node.name))
 
         _print_time = False
@@ -792,7 +926,7 @@ class BoundedModule(nn.Module):
         while len(queue) > 0:
             l = queue.popleft()
             for l_pre in l.input_name:
-                degree_out[l_pre] += 1 # calculate the out degree
+                degree_out[l_pre] += 1  # calculate the out degree
                 if self._modules[l_pre].bounded:
                     self._modules[l_pre].bounded = False
                     queue.append(self._modules[l_pre])
@@ -811,11 +945,15 @@ class BoundedModule(nn.Module):
         def _get_A_shape(node):
             shape_A = ''
             if bound_lower:
-                try: shape_A += 'lA shape {} '.format(node.lA.shape) 
-                except: pass
+                try:
+                    shape_A += 'lA shape {} '.format(node.lA.shape)
+                except:
+                    pass
             if bound_upper:
-                try: shape_A += 'uA shape {} '.format(node.uA.shape) 
-                except: pass
+                try:
+                    shape_A += 'uA shape {} '.format(node.uA.shape)
+                except:
+                    pass
             return shape_A
 
         queue = deque([node])
@@ -828,11 +966,11 @@ class BoundedModule(nn.Module):
                 b_dict[l.name] = {
                     'lower_b': lb,
                     'upper_b': ub
-                }            
+                }
 
             if l.name in self.root_name or l == root: continue
 
-            for l_pre in l.input_name: # if all the succeeds are done, then we can turn to this node in the next iteration.
+            for l_pre in l.input_name:  # if all the succeeds are done, then we can turn to this node in the next iteration.
                 _l = self._modules[l_pre]
                 degree_out[l_pre] -= 1
                 if degree_out[l_pre] == 0:
@@ -850,10 +988,15 @@ class BoundedModule(nn.Module):
                         # change paddings to merge the two patches
                         if A.padding != B.padding:
                             if A.padding > B.padding:
-                                B = B._replace(patches = F.pad(B.patches, (A.padding - B.padding, A.padding - B.padding, A.padding - B.padding, A.padding - B.padding)))
+                                B = B._replace(patches=F.pad(B.patches, (
+                                    A.padding - B.padding, A.padding - B.padding, A.padding - B.padding,
+                                    A.padding - B.padding)))
                             else:
-                                A = A._replace(patches = F.pad(A.patches, (B.padding - A.padding, B.padding - A.padding, B.padding - A.padding, B.padding - A.padding)))
-                        return Patches(A.patches + B.patches, B.stride, max(A.padding, B.padding), (A.patches + B.patches).shape)
+                                A = A._replace(patches=F.pad(A.patches, (
+                                    B.padding - A.padding, B.padding - A.padding, B.padding - A.padding,
+                                    B.padding - A.padding)))
+                        return Patches(A.patches + B.patches, B.stride, max(A.padding, B.padding),
+                                       (A.patches + B.patches).shape)
                     elif type(A) == BoundList:
                         A.bound_list.append(B)
                         return A
@@ -876,9 +1019,11 @@ class BoundedModule(nn.Module):
                     continue
 
                 small_A = 0
-                if l.lA is not None and not isinstance(l.lA, eyeC) and not isinstance(l.lA, Patches) and torch.norm(l.lA, p=1) < epsilon:
+                if l.lA is not None and not isinstance(l.lA, eyeC) and not isinstance(l.lA, Patches) and torch.norm(
+                        l.lA, p=1) < epsilon:
                     small_A += 1
-                if l.uA is not None and not isinstance(l.uA, eyeC) and not isinstance(l.uA, Patches) and torch.norm(l.uA, p=1) < epsilon:
+                if l.uA is not None and not isinstance(l.uA, eyeC) and not isinstance(l.uA, Patches) and torch.norm(
+                        l.uA, p=1) < epsilon:
                     small_A += 1
                 if small_A == 2:
                     continue
@@ -890,29 +1035,33 @@ class BoundedModule(nn.Module):
                     small_A += 1
                 if small_A == 2:
                     continue
-                
+
                 try:
                     try:
                         # TODO automatically check A shape
                         logger.debug('Backward at {}[{}], fv shape {}, {}'.format(
                             l, l.name, l.forward_value.shape, _get_A_shape(l)))
-                    except: pass            
+                    except:
+                        pass
                     A, lower_b, upper_b = l.bound_backward(l.lA, l.uA, *input_nodes)
                     if return_A:
-                        A_record.update({l.name: A})
+                        if isinstance(self._modules[l.input_name[0]], BoundRelu):
+                            A_record.update({l.name: A})
                 except:
                     raise Exception('Error at bound_backward of {}, {}'.format(l, l.name))
-  
+
                 if _print_time:
                     time_elapsed = time.time() - start_time
                     if time_elapsed > 1e-3:
                         print(l, time_elapsed)
                 lb = lb + lower_b
-                ub = ub + upper_b                  
+                ub = ub + upper_b
 
                 for i, l_pre in enumerate(l.input_name):
-                    try: logger.debug('  {} -> {}, uA shape {}'.format(l.name, l_pre, A[i][1].shape))
-                    except: pass
+                    try:
+                        logger.debug('  {} -> {}, uA shape {}'.format(l.name, l_pre, A[i][1].shape))
+                    except:
+                        pass
                     _l = self._modules[l_pre]
                     add_bound(_l, lA=A[i][0], uA=A[i][1])
 
@@ -926,24 +1075,26 @@ class BoundedModule(nn.Module):
 
         if return_A:
             # return A matrix as a dict: {node.name: [A_lower, A_upper]}
-            this_A_dict = {'bias': [lb, ub]}
+            this_A_dict = {'bias': [lb.detach(), ub.detach()]}
             for i in range(len(root)):
                 if root[i].lA is None and root[i].uA is None: continue
                 this_A_dict.update({root[i].name: [root[i].lA, root[i].uA]})
             this_A_dict.update(A_record)
             A_dict.update({node.name: this_A_dict})
 
-        for i in range(len(root)): 
+        for i in range(len(root)):
             if root[i].lA is None and root[i].uA is None: continue
             # FIXME maybe this one is broken after moving the output dimension to the first
             if average_A and isinstance(root[i], BoundParams):
                 A_shape = root[i].lA.shape if bound_lower else root[i].uA.shape
-                lA = root[i].lA.mean(0, keepdim=True).repeat(A_shape[0], *[1]*len(A_shape[1:])) if bound_lower else None
-                uA = root[i].uA.mean(0, keepdim=True).repeat(A_shape[0], *[1]*len(A_shape[1:])) if bound_upper else None
+                lA = root[i].lA.mean(0, keepdim=True).repeat(A_shape[0],
+                                                             *[1] * len(A_shape[1:])) if bound_lower else None
+                uA = root[i].uA.mean(0, keepdim=True).repeat(A_shape[0],
+                                                             *[1] * len(A_shape[1:])) if bound_upper else None
             else:
                 lA = root[i].lA
                 uA = root[i].uA
-            
+
             if not isinstance(root[i].lA, eyeC) and not isinstance(root[i].lA, Patches):
                 lA = root[i].lA.reshape(output_dim, batch_size, -1).transpose(0, 1) if bound_lower else None
             if not isinstance(root[i].uA, eyeC) and not isinstance(root[i].lA, Patches):
@@ -958,8 +1109,10 @@ class BoundedModule(nn.Module):
                         root[i].center.unsqueeze(0), uA,
                         sign=+1, aux=root[i].aux) if bound_upper else None
                 else:
-                    lb = lb + root[i].perturbation.concretize(root[i].center, lA, sign=-1, aux=root[i].aux) if bound_lower else None
-                    ub = ub + root[i].perturbation.concretize(root[i].center, uA, sign=+1, aux=root[i].aux) if bound_upper else None
+                    lb = lb + root[i].perturbation.concretize(root[i].center, lA, sign=-1,
+                                                              aux=root[i].aux) if bound_lower else None
+                    ub = ub + root[i].perturbation.concretize(root[i].center, uA, sign=+1,
+                                                              aux=root[i].aux) if bound_upper else None
             # FIXME to simplify
             elif i < self.num_global_inputs:
                 if not isinstance(lA, eyeC):
@@ -997,7 +1150,7 @@ class BoundedModule(nn.Module):
             b = node.forward_value
             node.linear = LinearBound(w, b, w, b, b, b)
             node.lower = node.upper = b
-            node.interval = (node.lower, node.upper) 
+            node.interval = (node.lower, node.upper)
             return node.interval
 
         if not hasattr(node, 'linear'):
@@ -1014,7 +1167,7 @@ class BoundedModule(nn.Module):
             else:
                 node.linear = node.bound_forward(dim_in, *inp)
                 C_merged = False
-            
+
             lw, uw = node.linear.lw, node.linear.uw
             lower, upper = node.linear.lb, node.linear.ub
 
@@ -1025,15 +1178,15 @@ class BoundedModule(nn.Module):
                 _uw = torch.matmul(uw, C_pos.transpose(-1, -2)) + torch.matmul(lw, C_neg.transpose(-1, -2))
                 lw, uw = _lw, _uw
                 _lower = torch.matmul(lower.unsqueeze(1), C_pos.transpose(-1, -2)) + \
-                    torch.matmul(upper.unsqueeze(1), C_neg.transpose(-1, -2))
+                         torch.matmul(upper.unsqueeze(1), C_neg.transpose(-1, -2))
                 _upper = torch.matmul(upper.unsqueeze(1), C_pos.transpose(-1, -2)) + \
-                    torch.matmul(lower.unsqueeze(1), C_neg.transpose(-1, -2))        
-                lower, upper = _lower.squeeze(1), _upper.squeeze(1)  
+                         torch.matmul(lower.unsqueeze(1), C_neg.transpose(-1, -2))
+                lower, upper = _lower.squeeze(1), _upper.squeeze(1)
             else:
-                lower, upper = lower.squeeze(1), upper.squeeze(1)  
+                lower, upper = lower.squeeze(1), upper.squeeze(1)
         else:
             lw, uw = node.linear.lw, node.linear.uw
-            lower, upper = node.linear.lb, node.linear.ub          
+            lower, upper = node.linear.lb, node.linear.ub
 
         if concretize:
             if node.linear.lw is not None:
@@ -1044,8 +1197,8 @@ class BoundedModule(nn.Module):
                 uA = uw.reshape(batch_size, dim_in, -1).transpose(1, 2)
                 for i in range(len(root)):
                     if root[i].perturbation is not None:
-                        _lA = lA[:, :, prev_dim_in : (prev_dim_in + root[i].dim)]
-                        _uA = uA[:, :, prev_dim_in : (prev_dim_in + root[i].dim)]
+                        _lA = lA[:, :, prev_dim_in: (prev_dim_in + root[i].dim)]
+                        _uA = uA[:, :, prev_dim_in: (prev_dim_in + root[i].dim)]
                         lower = lower + root[i].perturbation.concretize(
                             root[i].center, _lA, sign=-1, aux=root[i].aux).view(lower.shape)
                         upper = upper + root[i].perturbation.concretize(
@@ -1096,6 +1249,7 @@ class BoundedModule(nn.Module):
 
     """Add perturbation to an intermediate node and it is treated as an independent 
     node in bound computation."""
+
     def add_intermediate_perturbation(self, node, perturbation):
         node.perturbation = perturbation
         node.perturbed = True
@@ -1126,7 +1280,7 @@ class BoundDataParallel(DataParallel):
         if not self.device_ids or disable_multi_gpu:
             if kwargs.pop("get_property", False):
                 return self.get_property(self, *inputs, **kwargs)
-            return self.module(*inputs, **kwargs)            
+            return self.module(*inputs, **kwargs)
 
         if kwargs.pop("get_property", False):
             if self._replicas is None:
@@ -1137,7 +1291,7 @@ class BoundDataParallel(DataParallel):
             kwargs = list(kwargs)
             for i in range(len(kwargs)):
                 kwargs[i]['model'] = self._replicas[i]
-            outputs = self.parallel_apply([self.get_property]*len(kwargs), inputs, kwargs)
+            outputs = self.parallel_apply([self.get_property] * len(kwargs), inputs, kwargs)
             return self.gather(outputs, self.output_device)
 
         # Only replicate during forward/IBP propagation. Not during interval bounds
@@ -1161,7 +1315,8 @@ class BoundDataParallel(DataParallel):
         if len(inputs) > 0 and hasattr(inputs[0], 'ptb') and inputs[0].ptb is not None:
             # compute bounds without x
             # inputs_scatter is a normal tensor, we need to assign ptb to it if inputs is a BoundedTensor
-            inputs_scatter, kwargs = self.scatter((inputs, inputs[0].ptb.x_L, inputs[0].ptb.x_U), kwargs, self.device_ids)
+            inputs_scatter, kwargs = self.scatter((inputs, inputs[0].ptb.x_L, inputs[0].ptb.x_U), kwargs,
+                                                  self.device_ids)
             # inputs_scatter = inputs_scatter[0]
             bounded_inputs = []
             for input_s in inputs_scatter:  # GPU numbers

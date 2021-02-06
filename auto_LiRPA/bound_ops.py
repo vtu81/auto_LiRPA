@@ -473,16 +473,34 @@ class BoundLinear(Bound):
 
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
 
+        # Defaults in ONNX
+        self.transA = 0
+        self.transB = 0
+        self.alpha = 1.0
+        self.beta = 1.0
         if attr is not None:
-            # assumption: using it as a linear layer now
-            assert 'transA' not in attr
-            assert 'transB' not in attr or attr['transB'] == 1
-            assert 'alpha' not in attr or attr['alpha'] == 1.0
-            assert 'beta' not in attr or attr['beta'] == 1.0
+            self.transA = attr['transA'] if 'transA' in attr else self.transA
+            self.transB = attr['transB'] if 'transB' in attr else self.transB
+            self.alpha = attr['alpha'] if 'alpha' in attr else self.alpha
+            self.beta = attr['beta'] if 'beta' in attr else self.beta
 
         self.opt_matmul = options.get('matmul')
 
+    # Handle tranpose and linear coefficients
+    def _preprocess(self, a, b, c):
+        if self.transA and isinstance(a, torch.Tensor):
+            a = a.t()
+        if self.alpha != 1.0:
+            a = self.alpha * a
+        if not self.transB and isinstance(b, torch.Tensor):  # our code assumes B is transposed.
+            b = b.t()
+        if c is not None:
+            if self.beta != 1.0:
+                c = self.beta * c
+        return a, b, c
+
     def forward(self, x, w, b=None):
+        x, w, b = self._preprocess(x, w, b)
         self.input_shape = self.x_shape = x.shape
         self.y_shape = w.t().shape
         res = x.matmul(w.t())
@@ -493,6 +511,7 @@ class BoundLinear(Bound):
     def bound_backward(self, last_lA, last_uA, *x):
         assert len(x) == 2 or len(x) == 3
         has_bias = len(x) == 3
+        x = self._preprocess(*x)
         # x[0]: input node, x[1]: weight, x[2]: bias
         lA_y = uA_y = lA_bias = uA_bias = None
         lbias = ubias = 0
@@ -653,6 +672,11 @@ class BoundLinear(Bound):
 
     def interval_propagate(self, *v, C=None, w=None):
         has_bias = len(v) == 3
+        vv = [[None, None], [None, None], [None, None]]
+        if self is not None:
+            vv[0][0], vv[1][0], vv[2][0] = self._preprocess(v[0][0], v[1][0], v[2][0])
+            vv[0][1], vv[1][1], vv[2][1] = self._preprocess(v[0][1], v[1][1], v[2][1])
+            v = vv
         if w is None and self is None:
             # Use C as the weight, no bias.
             w, lb, ub = C, torch.tensor(0., device=C.device), torch.tensor(0., device=C.device)
@@ -783,6 +807,7 @@ class BoundLinear(Bound):
     # w: an optional argument which can be utilized by BoundMatMul
     def bound_forward(self, dim_in, x, w=None, b=None, C=None):
         has_bias = b is not None
+        x, w, b = self._preprocess(x, w, b)
 
         # Case #1: No weight/bias perturbation, only perturbation on input.
         if not self.is_input_perturbed(1) and (not has_bias or not self.is_input_perturbed(2)):
@@ -854,7 +879,6 @@ class BoundLinear(Bound):
 class BoundBatchNormalization(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device, training):
 
-        self.num_features = inputs[2].param.shape[0]
         self.eps = attr['epsilon']
         self.momentum = round(1 - attr['momentum'], 5)  # take care!
         self.affine = True
@@ -1001,9 +1025,9 @@ class BoundConv(Bound):
                 shape = last_A.size()
             # when (W−F+2P)%S != 0, construct the output_padding
                 output_padding0 = int(self.input_shape[1]) - (int(self.output_shape[1]) - 1) * self.stride[0] + 2 * \
-                                self.padding[0] - int(weight.size()[2])
+                                self.padding[0] - 1 - (int(weight.size()[2] - 1) * self.dilation[0])
                 output_padding1 = int(self.input_shape[2]) - (int(self.output_shape[2]) - 1) * self.stride[1] + 2 * \
-                                self.padding[1] - int(weight.size()[3])
+                                self.padding[1] - 1 - (int(weight.size()[3] - 1) * self.dilation[0])
                 next_A = F.conv_transpose2d(last_A.reshape(shape[0] * shape[1], *shape[2:]), weight, None,
                                             stride=self.stride, padding=self.padding, dilation=self.dilation,
                                             groups=self.groups, output_padding=(output_padding0, output_padding1))
@@ -1045,7 +1069,7 @@ class BoundConv(Bound):
                     sum_bias = x[2].fv.unsqueeze(0).unsqueeze(2).unsqueeze(3).transpose(0, 1)
                 else:
                     raise NotImplementedError()
-                padding = last_A.padding if last_A is not None else 0
+                padding = last_A.padding if last_A is not None else 0  # FIXME: support asymmetric padding.
                 stride = last_A.stride if last_A is not None else 1
 
                 padding = padding * self.stride[0] + self.padding[0]
@@ -1240,7 +1264,7 @@ class BoundConcat(Bound):
         self.input_size = [item.shape[self.axis] for item in x]
         if self.axis < 0:
             self.axis = x[0].ndim + self.axis
-        return torch.cat(x, dim=self.axis)
+        return torch.cat(x, dim=int(self.axis))
 
     def interval_propagate(self, *v):
         norms = []
@@ -1318,6 +1342,7 @@ class BoundAdd(Bound):
     def forward(self, x, y):
         self.x_shape = x.shape
         self.y_shape = y.shape
+
         return x + y
 
     def bound_backward(self, last_lA, last_uA, x, y):
@@ -1393,19 +1418,36 @@ class BoundPad(Bound):
         assert self.padding == [0, 0, 0, 0]
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
 
-    def forward(self, *x):
-        return x[0]  # F.pad(x[0], self.padding, 'constant', self.value)
-
-    def bound_backward(self, last_lA, last_uA, x, pad=None):
-        # TODO
-        if pad:
-            return [(last_lA, last_uA), (None, None)], 0, 0
-        else:
-            return [(last_lA, last_uA)], 0, 0
+    def forward(self, x, pad, value=0.0):
+        # TODO: padding for 3-D or more dimensional inputs.
+        assert x.ndim == 4
+        # x[1] should be [0,0,pad_top,pad_left,0,0,pad_bottom,pad_right]
+        pad = [int(pad[3]), int(pad[7]), int(pad[2]), int(pad[6])]
+        final = F.pad(x, pad, value=value)
+        self.padding, self.value = pad, value
+        return final
 
     def interval_propagate(self, *v):
-        h_L, h_U = v[0]
-        return h_L, h_U
+        l, u = zip(*v)
+        return Interval.make_interval(self.forward(*l), self.forward(*u), v[0])
+
+    def bound_backward(self, last_lA, last_uA, *x):
+        # TODO: padding for 3-D or more dimensional inputs.
+        pad = self.padding
+        left, right, top, bottom = self.padding
+        def _bound_oneside(last_A):
+            if last_A is None:
+                return None
+            assert type(last_A) is Patches or last_A.ndim == 5
+            if type(last_A) is Patches:
+                new_padding = (last_A.padding + left, last_A.padding + right, last_A.padding + top, last_A.padding + bottom)   # FIXME: fully support different padding size on each side.
+                return Patches(last_A.patches, last_A.stride, new_padding, last_A.shape, last_A.identity)
+            else:
+                shape = last_A.size()
+                return last_A[:, :, :, top:(shape[3] - bottom), left:(shape[4] - right)]
+        last_lA = _bound_oneside(last_lA)
+        last_uA = _bound_oneside(last_uA)
+        return [(last_lA, last_uA), (None, None), (None, None)], 0, 0
 
     def infer_batch_dim(self, batch_size, *x):
         assert x[0] == 0
@@ -1579,12 +1621,31 @@ class BoundRelu(BoundActivation):
 
         if self.options == "random_evaluation":
             self.slope = None
+            self.relu_used_count = 1
+
+        self.beta = None
+        self.beta_mask = None
+
+    def clean_slope(self):
+        self.slope = None
+
+    def _init_slope(self, x):
+        # self.slope = torch.ones_like(x, dtype=torch.float).to(x.device)
+        self.slope = torch.ones([self.relu_used_count, *x.shape], dtype=torch.float).to(x.device)
+        self.slope.requires_grad_(True)
 
     def forward(self, x):
         if self.options == "random_evaluation":
-            if self.slope is None or self.slope.shape != x.shape:
-                self.slope = torch.ones_like(x, dtype=torch.float).to(x.device)
-                self.slope.requires_grad_(True)
+            # if self.slope is None or self.slope.shape != x.shape:
+            if self.slope is None:
+                self._init_slope(x)
+
+            if self.beta is None:
+                # self.beta = torch.zeros([self.relu_used_count, *x.shape], dtype=torch.float).to(x.device)
+                self.beta = torch.zeros([1, *x.shape], dtype=torch.float).to(x.device)
+                self.beta_mask = torch.zeros_like(x, dtype=torch.float).to(x.device)
+                self.beta.requires_grad_(True)
+
         return F.relu(x)
 
     # linear relaxation for nonlinear functions
@@ -1616,6 +1677,12 @@ class BoundRelu(BoundActivation):
 
     def bound_backward(self, last_lA, last_uA, x=None):
         if x is not None:
+            if self.beta is not None:
+                if self.beta_mask.abs().sum() != 0:
+                    # print(x.lower.shape)
+                    x.lower = x.lower * (self.beta_mask != 1).to(torch.float32)
+                    x.upper = x.upper * (self.beta_mask != -1).to(torch.float32)
+
             lb_r = x.lower.clamp(max=0)
             ub_r = x.upper.clamp(min=0)
         else:
@@ -1642,7 +1709,11 @@ class BoundRelu(BoundActivation):
         elif self.options == "reversed-adaptive":
             lower_d = (upper_d < 0.5).float()
         elif self.options == "random_evaluation":
-            lower_d = self.slope.clone().clamp(min=0.0, max=1.0)
+            self.relu_used_count -= 1
+            idx = max(self.relu_used_count, 0)
+            # print('idx', idx)
+            lower_d = self.slope[idx].clamp(min=0.0, max=1.0)
+            # lower_d = self.slope.clone().clamp(min=0.0, max=1.0)
             if x is not None:
                 lower = x.lower
                 upper = x.upper
@@ -1650,7 +1721,7 @@ class BoundRelu(BoundActivation):
                 lower = self.lower
                 upper = self.upper
             lower_d[lower >= 0] = 1.0
-            lower_d[upper < 0] = 0.0
+            lower_d[upper <= 0] = 0.0
         else:
             lower_d = (upper_d > 0.5).float()
 
@@ -1710,6 +1781,39 @@ class BoundRelu(BoundActivation):
         uA, ubias = _bound_oneside(last_uA, upper_d, lower_d, upper_b, None)
         lA, lbias = _bound_oneside(last_lA, lower_d, upper_d, None, upper_b)
 
+        if self.beta is not None:
+            if self.beta_mask.abs().sum()!=0:
+                # assert (self.beta[idx].shape == self.beta_mask.shape)
+                masked_beta = self.beta[0] * self.beta_mask
+                # index = self.beta_mask.view(-1).nonzero()
+                # print("uA, lA, beta:", uA.view(-1)[index], lA.view(-1)[index], (self.beta*self.beta_mask).view(-1)[index])
+                A = last_uA if last_uA is not None else last_lA
+                if type(A) is Patches:
+                    A_patches = A.patches
+                    # unfold the beta as patches
+                    masked_beta_unfolded = F.unfold(masked_beta, kernel_size=A_patches.size(-1), padding=A.padding, stride=A.stride)
+                    L = masked_beta_unfolded.size(-1)
+                    # reshape the unfolded patches as [batch_size, L, 1, in_c, H, W]
+                    masked_beta_unfolded = masked_beta_unfolded.transpose(-2, -1)
+                    masked_beta_unfolded = masked_beta_unfolded.view(
+                            masked_beta_unfolded.size(0), masked_beta_unfolded.size(1), A_patches.size(-3), A_patches.size(-2), A_patches.size(-1)).unsqueeze(2)
+                    if uA is not None:
+                        uA = Patches(uA.patches + masked_beta_unfolded, uA.stride, uA.padding, uA.patches.shape, 0)
+                    if lA is not None:
+                        lA = Patches(lA.patches - masked_beta_unfolded, lA.stride, lA.padding, lA.patches.shape, 0)
+                elif type(A) is torch.Tensor:
+                    if uA is not None:
+                        uA = uA + masked_beta
+                    if lA is not None:
+                        lA = lA - masked_beta
+                else:
+                    raise RuntimeError(f"Unknown type {type(A)} for A")
+
+        # print(uA, lA)
+
+        ###### make sure that nonzero beta mask will only be negative 0 or positive 1 for uA and lA
+        ###### assert uA[nonzero beta mask] == lA[nonzero beta mask]
+
         self.d = upper_d.squeeze(0)
         return [(lA, uA)], lbias, ubias
 
@@ -1721,9 +1825,8 @@ class BoundRelu(BoundActivation):
         self.lower = h_L
 
         if self.options == "random_evaluation":
-            if self.slope is None or self.slope.shape != h_U.shape:
-                self.slope = torch.zeros(h_U.shape, dtype=torch.float).cuda()
-                self.slope.requires_grad_(True)
+            if self.slope is None:
+                self._init_slope(h_U)
 
         return F.relu(h_L), F.relu(h_U)
 
@@ -3143,21 +3246,42 @@ class BoundCumSum(Bound):
 class BoundSlice(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+        self.start = attr["starts"][0] if "starts" in attr else None
+        self.end = attr["ends"][0] if "ends" in attr else None
+        self.axes = attr["axes"][0] if "axes" in attr else None
 
-    def forward(self, x, start, end, axes, steps=1):
-        assert steps == 1 and axes == int(axes) and start == int(start) and end == int(end)
-        start, end, axes, steps = int(start), int(end), int(axes), int(steps)
+    # Older Pytorch version only passes steps as input.
+    def forward(self, x, start=None, end=None, axes=None, steps=1):
+        start = self.start if start is None else start
+        end = self.end if end is None else end
+        axes = self.axes if axes is None else axes
+        assert (steps == 1 or steps == -1) and axes == int(axes) and start == int(start) and end == int(end)
         shape = x.shape if isinstance(x, torch.Tensor) else [len(x)]
         if start < 0:
             start += shape[axes]
         if end < 0:
-            end += shape[axes]
+            if end == -9223372036854775807:  # -inf in ONNX
+                end = 0  # only possible when step == -1
+            else:
+                end += shape[axes]
+        if steps == -1:        
+            start, end = end, start + 1  # TODO: more test more negative step size.
         end = min(end, shape[axes])
-        return torch.narrow(x, dim=axes, start=start, length=(end - start))
+        final = torch.narrow(x, dim=int(axes), start=int(start), length=int(end - start))
+        if steps == -1:
+            final = torch.flip(final, dims=tuple(axes))
+        return final
+
+    def interval_propagate(self, *v):
+        l, u = zip(*v)
+        return self.forward(*l), self.forward(*u)
 
     def infer_batch_dim(self, batch_size, *x):
-        assert x[0] == -1
-        return -1
+        if x[0] == -1:
+            return -1
+        else:
+            assert self.axes != x[0]
+            return x[0]
 
 
 class BoundSin(Bound):
