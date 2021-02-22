@@ -52,6 +52,7 @@ parser.add_argument("--model", type=str, default="cnn_7layer_bn",
 parser.add_argument("--num_epochs", type=int, default=2000, help='number of total epochs')
 parser.add_argument("--batch_size", type=int, default=256, help='batch size')
 parser.add_argument("--lr", type=float, default=5e-4, help='learning rate')
+parser.add_argument("--lr_decay_rate", type=float, default=0.1, help='learning rate decay rate')
 parser.add_argument("--lr_decay_milestones", nargs='+', type=int, default=[1400, 1700], help='learning rate dacay milestones')
 parser.add_argument("--scheduler_name", type=str, default="SmoothedScheduler",
                     choices=["LinearScheduler", "AdaptiveScheduler", "SmoothedScheduler"], help='epsilon scheduler')
@@ -284,7 +285,7 @@ def main(args):
     ## Step 4 prepare optimizer, epsilon scheduler and learning rate scheduler
     opt = optim.Adam(model_loss.parameters(), lr=args.lr)
     norm = float(args.norm)
-    lr_scheduler = optim.lr_scheduler.MultiStepLR(opt, milestones=args.lr_decay_milestones, gamma=0.1)
+    lr_scheduler = optim.lr_scheduler.MultiStepLR(opt, milestones=args.lr_decay_milestones, gamma=args.lr_decay_rate)
     eps_scheduler = eval(args.scheduler_name)(args.eps, args.scheduler_opts)
     logger.log(str(model_ori))
 

@@ -103,7 +103,6 @@ class Wide_ResNet(nn.Module):
 
         return out
 
-
 def wide_resnet_cifar():
     return Wide_ResNet(16, 4, 0.3, 10)
 

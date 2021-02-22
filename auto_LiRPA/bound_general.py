@@ -23,7 +23,13 @@ class BoundedModule(nn.Module):
         self.verbose = verbose
         self.bound_opts = bound_opts
         self.auto_batch_dim = auto_batch_dim
-        self.device = device if device != 'auto' else next(model.parameters()).device
+        if device == 'auto':
+            try:
+                self.device = next(model.parameters()).device
+            except StopIteration:  # Model has no parameters. We use the device of input tensor.
+                self.device = global_input.device
+        else:
+            self.device = device
         self.global_input = global_input
         if auto_batch_dim:
             # logger.warning('Using automatic batch dimension inferring, which may not be correct')
@@ -199,7 +205,6 @@ class BoundedModule(nn.Module):
             return _fill_template(self.output_template)
 
     """Mark the graph nodes and determine which nodes need perturbation."""
-
     def _mark_perturbed_nodes(self):
         degree_in = {}
         queue = deque()
@@ -235,7 +240,7 @@ class BoundedModule(nn.Module):
                     for item in l.linear:
                         del (item)
                 delattr(l, 'linear')
-            for attr in ['forward_value', 'lower', 'upper', 'interval']:
+            for attr in ['forward_value', 'fv', 'lower', 'upper', 'interval']:
                 if hasattr(l, attr):
                     delattr(l, attr)
             # Given an interval here to make IBP/CROWN start from this node
@@ -342,12 +347,14 @@ class BoundedModule(nn.Module):
             try:
                 if nodesOP[n].op in bound_op_map:
                     op = bound_op_map[nodesOP[n].op]
+                elif nodesOP[n].op.startswith('aten::ATen'):
+                    op = eval('BoundATen{}'.format(attr['operator'].capitalize()))
                 elif nodesOP[n].op.startswith('onnx::'):
                     op = eval('Bound{}'.format(nodesOP[n].op[6:]))
                 else:
                     raise KeyError
             except (NameError, KeyError):
-                unsupported_ops.append(nodesOP[n].op)
+                unsupported_ops.append(nodesOP[n])
                 logger.error('The node has an unsupported operation: {}'.format(nodesOP[n]))
                 continue
 
@@ -366,8 +373,8 @@ class BoundedModule(nn.Module):
 
         if unsupported_ops:
             logger.error('Unsupported operations:')
-            for op in set(unsupported_ops):
-                logger.error(op)
+            for n in unsupported_ops:
+                logger.error(f'Name: {n.op}, Attr: {n.attr}')
             raise NotImplementedError('There are unsupported operations')
 
         return nodesOP, nodesIn, nodesOut, template
@@ -510,6 +517,7 @@ class BoundedModule(nn.Module):
                 if relu_used < start_idx:
                     relu_used += 1
                 # print('relu used', relu_used)
+                # print('we are using single alpha!!')
                 model.relu_used_count = relu_used  # or always = 1 if not using multiple alpha
 
     def get_optimized_bounds(self, x=None, aux=None, C=None, IBP=False, forward=False, method='backward',
@@ -681,7 +689,7 @@ class BoundedModule(nn.Module):
             # directly return the previously saved ibp bounds
             return self.ibp_lower, self.ibp_upper
         root = [self._modules[name] for name in self.root_name]
-        batch_size = root[0].fv.shape[0]
+        batch_size = root[0].value.shape[0]
         dim_in = 0
         for i in range(len(root)):
             value = root[i].forward()
@@ -697,7 +705,7 @@ class BoundedModule(nn.Module):
             else:
                 # This inpute/parameter does not has perturbation. Use plain tuple defaulting to Linf perturbation.
                 root[i].interval = (value, value)
-                root[i].lower = root[i].upper = value
+                root[i].forward_value = root[i].fv = root[i].value = root[i].lower = root[i].upper = value
 
         if forward:
             self._init_forward(root, dim_in)
@@ -705,12 +713,13 @@ class BoundedModule(nn.Module):
         final = self._modules[self.final_name] if final_node_name is None else self._modules[final_node_name]
         logger.debug('Final node {}[{}]'.format(final, final.name))
 
-        if C is None:
-            # C is an identity matrix by default 
+        if C is None and (not IBP or method is not None):
+            # C is an identity matrix by default.
+            # For IBP without backward/forward we don't need a C matrix in this case, just leave it as None.
             if final.default_shape is None:
                 raise ValueError('C is not provided while node {} has no default shape'.format(final.shape))
             dim_output = int(np.prod(final.default_shape[1:]))
-            C = torch.eye(dim_output).to(self.device).unsqueeze(0).repeat(batch_size, 1, 1)
+            C = torch.eye(dim_output).to(self.device).unsqueeze(0).repeat(batch_size, 1, 1)  # TODO: use an eyeC object here.
 
         if IBP:
             lower, upper = self._IBP_general(node=final, C=C)
@@ -845,8 +854,8 @@ class BoundedModule(nn.Module):
                 node_linear = self._modules[node.input_name[0]]
                 node_start = self._modules[node_linear.input_name[0]]
                 if isinstance(node_linear, BoundLinear):
-                    w = self._modules[node_linear.input_name[1]].fv
-                    b = self._modules[node_linear.input_name[2]].fv
+                    w = self._modules[node_linear.input_name[1]].param
+                    b = self._modules[node_linear.input_name[2]].param
                     labels = self._modules[node_gather.input_name[1]]
                     if not hasattr(node_start, 'interval'):
                         self._IBP_general(node_start)
@@ -1351,12 +1360,21 @@ class BoundDataParallel(DataParallel):
         return self.gather(outputs, self.output_device)
 
     @staticmethod
-    def get_property(model, node_class, att_name):
-        for _, node in model.named_modules():
-            # Find the Exp neuron in computational graph
-            if isinstance(node, node_class):
-                return getattr(node, att_name)
-
+    def get_property(model, node_class=None, att_name=None, node_name=None):
+        if node_name:
+            # Find node by name
+            # FIXME If we use `model.named_modules()`, the nodes have the
+            # `BoundedModule` type rather than bound nodes.
+            for node in model._modules.values():
+                if node.name == node_name:
+                    return getattr(node, att_name)    
+        else:
+            # Find node by class
+            for _, node in model.named_modules():
+                # Find the Exp neuron in computational graph
+                if isinstance(node, node_class):
+                    return getattr(node, att_name)
+             
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         # add 'module.' here before each keys in self.module.state_dict() if needed
         return self.module.state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
