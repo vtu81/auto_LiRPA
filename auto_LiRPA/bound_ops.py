@@ -501,14 +501,15 @@ class BoundLinear(Bound):
 
         self.opt_matmul = options.get('matmul')
 
-    # Handle tranpose and linear coefficients
+    """Handle tranpose and linear coefficients."""
     def _preprocess(self, a, b, c=None):
         if self.transA and isinstance(a, torch.Tensor):
-            a = a.t()
+            a = a.transpose(-2,-1)
         if self.alpha != 1.0:
             a = self.alpha * a
-        if not self.transB and isinstance(b, torch.Tensor):  # our code assumes B is transposed.
-            b = b.t()
+        if not self.transB and isinstance(b, torch.Tensor):
+            # our code assumes B is transposed (common case), so we transpose B only when it is not transposed in gemm.
+            b = b.transpose(-2,-1)
         if c is not None:
             if self.beta != 1.0:
                 c = self.beta * c
@@ -694,10 +695,12 @@ class BoundLinear(Bound):
     def interval_propagate(self, *v, C=None, w=None):
         has_bias = len(v) == 3
         if self is not None:
+            # This will convert an Interval object to tuple. We need to add perturbation property later.
             v_lb, v_ub = zip(*v)
             v_lb = self._preprocess(*v_lb)
             v_ub = self._preprocess(*v_ub)
-            v = list(zip(v_lb, v_ub))
+            # After preprocess the lower and upper bounds, we make them Intervals again.
+            v = [Interval.make_interval(bounds[0], bounds[1], bounds[2]) for bounds in zip(v_lb, v_ub, v)]
         if w is None and self is None:
             # Use C as the weight, no bias.
             w, lb, ub = C, torch.tensor(0., device=C.device), torch.tensor(0., device=C.device)
@@ -900,14 +903,11 @@ class BoundLinear(Bound):
 class BoundBatchNormalization(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device, training):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
-
         self.eps = attr['epsilon']
         self.momentum = round(1 - attr['momentum'], 5)  # take care!
-        self.affine = True
         self.mode = options.get("conv_mode", "matrix")
         self.bn_mode = options.get("bn", "forward")
         # self.num_batches_tracked = 0 # not support yet
-
         self.to(device)
         self.training = training
 
@@ -1032,7 +1032,7 @@ class BoundConv(Bound):
                 return None, 0
             if type(last_A) == torch.Tensor:
                 shape = last_A.size()
-            # when (W−F+2P)%S != 0, construct the output_padding
+                # when (W−F+2P)%S != 0, construct the output_padding
                 output_padding0 = int(self.input_shape[1]) - (int(self.output_shape[1]) - 1) * self.stride[0] + 2 * \
                                 self.padding[0] - 1 - (int(weight.size()[2] - 1) * self.dilation[0])
                 output_padding1 = int(self.input_shape[2]) - (int(self.output_shape[2]) - 1) * self.stride[1] + 2 * \
@@ -1247,7 +1247,6 @@ class BoundGlobalAveragePool(Bound):
         h_L, h_U = v[0]
         h_L = F.adaptive_avg_pool2d(h_L, (1, 1))
         h_U = F.adaptive_avg_pool2d(h_U, (1, 1))
-
         return h_L, h_U
 
     def infer_batch_dim(self, batch_size, *x):
@@ -1344,7 +1343,6 @@ class BoundAdd(Bound):
     def forward(self, x, y):
         self.x_shape = x.shape
         self.y_shape = y.shape
-
         return x + y
 
     def bound_backward(self, last_lA, last_uA, x, y):
@@ -2094,8 +2092,7 @@ class BoundReciprocal(BoundActivation):
 
     def interval_propagate(self, *v):
         h_L, h_U = v[0][0].float(), v[0][1].float()
-        # FIXME: Only positive values are supported.
-        assert h_L.min() > 0
+        assert h_L.min() > 0, 'Only positive values are supported in BoundReciprocal'
         return torch.reciprocal(h_U), torch.reciprocal(h_L)
 
 
@@ -2278,7 +2275,7 @@ class BoundGather(Bound):
     def forward(self, x, indices):
         self.input_shape = x.shape
         self.indices = indices
-        x = x.to(self.indices.device)  # Boundshape.shape() will return value on cpu only
+        x = x.to(self.indices.device)  # BoundShape.shape() will return value on cpu only
         if indices.ndim == 0:
             # `index_select` requires `indices` to be a 1-D tensor
             return torch.index_select(x, dim=self.axis, index=indices).squeeze(self.axis)
@@ -2289,8 +2286,7 @@ class BoundGather(Bound):
             'Unsupported shapes in Gather: data {}, indices {}, axis {}'.format(x.shape, indices.shape, self.axis))
 
     def bound_backward(self, last_lA, last_uA, x, indices):
-        assert (self.from_input)
-
+        assert self.from_input
         assert self.indices.ndim == 0  # TODO
 
         def _bound_oneside(A):
@@ -2808,12 +2804,10 @@ class BoundSoftmaxImpl(nn.Module):
     def __init__(self, axis):
         super().__init__()
         self.axis = axis
+        assert self.axis == int(self.axis)
 
     def forward(self, x):
         max_x = torch.max(x, dim=self.axis).values
-        assert self.axis == int(self.axis)
-        # FIXME double-check whether this can break previous experiments
-        # This does not seem to be a good implementation for computing bounds.
         x = torch.exp(x - max_x.unsqueeze(self.axis))
         s = torch.sum(x, dim=self.axis, keepdim=True)
         return x / s
@@ -2864,7 +2858,12 @@ class BoundReduceMax(Bound):
             assert len(self.axis) == 1
             self.axis = self.axis[0]
         self.keepdim = bool(attr['keepdims']) if 'keepdims' in attr else True
-        self.use_default_ibp = True        
+        self.use_default_ibp = True      
+
+        """Assume that the indexes with the maximum values are not perturbed. 
+        This generally doesn't hold true, but can still be used for the input shift 
+        in Softmax of Transformers."""   
+        self.fixed_max_index = options.get('fixed_reducemax_index', False)
 
     def forward(self, x):
         self.input_shape = x.shape
@@ -2875,26 +2874,29 @@ class BoundReduceMax(Bound):
         self.indices = res.indices
         return res.values
 
-    def bound_backward(self, last_lA, last_uA, x):
-        def _bound_oneside(last_A):
-            if last_A is None:
-                return None
-            indices = self.indices.unsqueeze(0)
-            if not self.keepdim:
-                assert (self.from_input)
-                last_A = last_A.unsqueeze(self.axis + 1)
-                indices = indices.unsqueeze(self.axis + 1)
-            shape = list(last_A.shape)
-            shape[self.axis + 1] *= self.input_shape[self.axis]
-            A = torch.zeros(shape, device=last_A.device)
-            A.scatter_(dim=self.axis + 1, index=indices, src=last_A)
-            return A
-
-        return [(_bound_oneside(last_lA), _bound_oneside(last_uA))], 0, 0
-
     def infer_batch_dim(self, batch_size, *x):
         assert x[0] != self.axis
         return x[0]
+
+    def bound_backward(self, last_lA, last_uA, x):
+        if self.fixed_max_index:	
+            def _bound_oneside(last_A):	
+                if last_A is None:	
+                    return None	
+                indices = self.indices.unsqueeze(0)	
+                if not self.keepdim:	
+                    assert (self.from_input)	
+                    last_A = last_A.unsqueeze(self.axis + 1)	
+                    indices = indices.unsqueeze(self.axis + 1)	
+                shape = list(last_A.shape)	
+                shape[self.axis + 1] *= self.input_shape[self.axis]	
+                A = torch.zeros(shape, device=last_A.device)	
+                A.scatter_(dim=self.axis + 1, index=indices, src=last_A)	
+                return A	
+
+            return [(_bound_oneside(last_lA), _bound_oneside(last_uA))], 0, 0	
+        else:
+            raise NotImplementedError('`bound_backward` for BoundReduceMax with perturbed maximum indexes is not implemented.')
 
 
 class BoundReduceMean(Bound):

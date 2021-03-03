@@ -40,6 +40,19 @@ class BoundedModule(nn.Module):
         self._convert(model, global_input)
         self._mark_perturbed_nodes()
 
+        # some arguments for optimized bounds
+        self.optimize_bound_args_list = ['ob_alpha', 'ob_beta', 'ob_opt_choice', 'ob_early_stop', 'ob_iteration', 'ob_start_idx',
+                                         'ob_decision_thresh', 'ob_update_by_layer', 'ob_log', 'ob_keep_best', 'ob_lr']
+        self.set_bound_opts(self.bound_opts.get('optimize_bound_args'))
+
+    def set_bound_opts(self, new_opt):
+        if new_opt:
+            for k, v in new_opt.items():
+                if k in self.optimize_bound_args_list:
+                    setattr(self, k, v)
+                else:
+                    raise NotImplementedError(k)
+
     def __call__(self, *input, **kwargs):
 
         if "method_opt" in kwargs:
@@ -522,18 +535,15 @@ class BoundedModule(nn.Module):
 
     def get_optimized_bounds(self, x=None, aux=None, C=None, IBP=False, forward=False, method='backward',
                              bound_lower=True, bound_upper=False, reuse_ibp=False, return_A=False, final_node_name=None,
-                             average_A=False, new_interval=None, iteration=10, beta=False, alpha=True, early_stop=True,
-                             log=False, opt_choice="default", start_idx=99, decision_thresh=0, keep_best=True,
-                             update_by_layer=False, lr=0.1):
+                             average_A=False, new_interval=None, ):
+
+        iteration = self.ob_iteration; beta = self.ob_beta; alpha = self.ob_alpha; early_stop = self.ob_early_stop
+        log = self.ob_log; opt_choice = self.ob_opt_choice; start_idx = self.ob_start_idx; decision_thresh = self.ob_decision_thresh
+        keep_best = self.ob_keep_best; update_by_layer = self.ob_update_by_layer; lr = self.ob_lr
 
         assert alpha or beta, "nothing to optimize, use compute bound instead!"
         if not update_by_layer: start_idx = 99
         self.set_relu_used_count(start_idx=start_idx)
-
-        # if x is None:
-        #     output = self.forward(self.global_input)
-        # else:
-        #     output = self.forward(x)
 
         if opt_choice == "adam":
             lr = 0.5 if iteration > 99 else lr
@@ -662,11 +672,6 @@ class BoundedModule(nn.Module):
                        bound_upper=True, reuse_ibp=False,
                        return_A=False, final_node_name=None, average_A=False, new_interval=None,
                        return_b=False, b_dict=None):
-        if not bound_lower and not bound_upper:
-            raise ValueError('At least one of bound_lower and bound_upper in compute_bounds should be True')
-        A_dict = {} if return_A else None
-        if x is not None:
-            self._set_input(*x, new_interval=new_interval)
 
         # Several shortcuts.
         method = method.lower() if method is not None else method
@@ -684,6 +689,16 @@ class BoundedModule(nn.Module):
         elif method == 'forward+backward':
             method = 'backward'
             forward = True
+        elif method == "crown-optimized":
+            return self.get_optimized_bounds(x=x, IBP=False, C=None, method='backward', new_interval=new_interval,
+                                             bound_lower=bound_lower, bound_upper=bound_upper, return_A=return_A)
+
+        if not bound_lower and not bound_upper:
+            raise ValueError('At least one of bound_lower and bound_upper in compute_bounds should be True')
+        A_dict = {} if return_A else None
+
+        if x is not None:
+            self._set_input(*x, new_interval=new_interval)
 
         if IBP and method is None and reuse_ibp:
             # directly return the previously saved ibp bounds
