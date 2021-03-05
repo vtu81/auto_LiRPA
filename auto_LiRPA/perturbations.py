@@ -78,12 +78,13 @@ class PerturbationL0Norm(Perturbation):
 
 """Perturbation constrained by the L_p norm."""
 class PerturbationLpNorm(Perturbation):
-    def __init__(self, eps, norm=np.inf, x_L=None, x_U=None):
+    def __init__(self, eps, norm=np.inf, x_L=None, x_U=None, relative=False):
         self.eps = eps
         self.norm = norm
         self.dual_norm = 1 if (norm == np.inf) else (np.float64(1.0) / (1 - 1.0 / self.norm))
         self.x_L = x_L
         self.x_U = x_U
+        self.relative = relative
 
     """Given an variable x and its bound matrix A, compute worst case bound according to Lp norm."""
     def concretize(self, x, A, sign=-1, aux=None):
@@ -185,15 +186,25 @@ class PerturbationLpNorm(Perturbation):
             # For other norms, we pass in the BoundedTensor objects directly.
             x_L = x
             x_U = x
+        if self.relative:
+            nominal = x
+            lower_offset = torch.max(x_L - x - 1e-8, torch.ones_like(x_L) * (-self.eps))
+            upper_offset = torch.min(x_U - x + 1e-8, torch.ones_like(x_U) * (self.eps))
+        else:
+            nominal = lower_offset = upper_offset = None     
         if not forward:
-            return LinearBound(None, None, None, None, x_L, x_U), x, None
+            return LinearBound(
+                None, None, None, None, x_L, x_U,
+                nominal=nominal, lower_offset=lower_offset, upper_offset=upper_offset), x, None
         batch_size = x.shape[0]
         dim = x.reshape(batch_size, -1).shape[-1]
         eye = torch.eye(dim).to(x.device).unsqueeze(0).repeat(batch_size, 1, 1)
         lw = eye.reshape(batch_size, dim, *x.shape[1:])
         lb = torch.zeros_like(x).to(x.device)
-        uw, ub = lw.clone(), lb.clone()       
-        return LinearBound(lw, lb, uw, ub, x_L, x_U), x, None
+        uw, ub = lw.clone(), lb.clone()     
+        return LinearBound(
+            lw, lb, uw, ub, x_L, x_U, 
+            nominal=nominal, lower_offset=lower_offset, upper_offset=upper_offset), x, None
 
     def __repr__(self):
         if self.norm == np.inf:

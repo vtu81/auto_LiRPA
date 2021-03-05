@@ -41,7 +41,7 @@ image = image.to(torch.float32) / 255.0
 
 ## Step 3: wrap model with auto_LiRPA
 # The second parameter is for constructing the trace of the computational graph, and its content is not important.
-model = BoundedModule(model, torch.empty_like(image))
+model = BoundedModule(model, torch.empty_like(image), bound_opts={'optimize_bound_args': {'ob_init': True, 'ob_upper': True, 'ob_decision_thresh': 1e8}})
 # For larger convolutional models, setting bound_opts={"conv_mode": "patches"} is more efficient.
 # model = BoundedModule(model, torch.empty_like(image), bound_opts={"conv_mode": "patches"})
 
@@ -53,10 +53,10 @@ ptb = PerturbationLpNorm(norm = norm, eps = eps)
 image = BoundedTensor(image, ptb)
 # Get model prediction as usual
 pred = model(image)
-label = torch.argmax(pred, dim=1).cpu().numpy()
+label = torch.argmax(pred, dim=1).cpu().detach().numpy()
 
 ## Step 5: Compute bounds for final output
-for method in ['IBP', 'IBP+backward (CROWN-IBP)', 'backward (CROWN)']:
+for method in ['IBP', 'IBP+backward (CROWN-IBP)', 'backward (CROWN)', 'CROWN-Optimized']:
     lb, ub = model.compute_bounds(x=(image,), method=method.split()[0])
     lb = lb.detach().cpu().numpy()
     ub = ub.detach().cpu().numpy()

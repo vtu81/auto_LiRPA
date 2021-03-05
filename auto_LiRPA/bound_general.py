@@ -31,18 +31,29 @@ class BoundedModule(nn.Module):
         else:
             self.device = device
         self.global_input = global_input
+        self.ibp_relative = bound_opts.get('ibp_relative', False)   
+        self.conv_mode = bound_opts.get("conv_mode", "matrix")     
         if auto_batch_dim:
             # logger.warning('Using automatic batch dimension inferring, which may not be correct')
             self.init_batch_size = -1
 
         state_dict_copy = copy.deepcopy(model.state_dict())
         object.__setattr__(self, 'ori_state_dict', state_dict_copy)
+        self.final_shape = model(*unpack_inputs(global_input)).shape
+        self.bound_opts.update({'final_shape': self.final_shape})
         self._convert(model, global_input)
         self._mark_perturbed_nodes()
 
         # some arguments for optimized bounds
         self.optimize_bound_args_list = ['ob_alpha', 'ob_beta', 'ob_opt_choice', 'ob_early_stop', 'ob_iteration', 'ob_start_idx',
-                                         'ob_decision_thresh', 'ob_update_by_layer', 'ob_log', 'ob_keep_best', 'ob_lr']
+                                         'ob_decision_thresh', 'ob_update_by_layer', 'ob_log', 'ob_keep_best', 'ob_lr',
+                                         'ob_init', 'ob_lower', 'ob_upper']
+        # set the default values here
+        self.set_bound_opts({'ob_iteration': 20, 'ob_beta': False, 'ob_alpha': True, 'ob_opt_choice': "adam",
+                             'ob_decision_thresh': 1000, 'ob_early_stop': False, 'ob_log': False, 'ob_start_idx': 99,
+                             'ob_keep_best': True, 'ob_update_by_layer': True, 'ob_lr': 0.5, 'ob_init': False,
+                             'ob_lower': True, 'ob_upper': False})
+        # change by bound_opts
         self.set_bound_opts(self.bound_opts.get('optimize_bound_args'))
 
     def set_bound_opts(self, new_opt):
@@ -419,6 +430,14 @@ class BoundedModule(nn.Module):
         for l in nodes:
             for l_pre in l.input_name:
                 self._modules[l_pre].output_name.append(l.name)
+        for l in nodes:
+            if self.conv_mode != 'patches' and len(l.input_name) == 0:
+                if not l.name in self.root_name:
+                    # Add independent nodes that do not appear in `nodesIn`.
+                    # Note that these nodes are added in the last, since 
+                    # order matters in the current implementation because 
+                    # `root[0]` is used in some places.
+                    self.root_name.append(l.name)
 
     def _split_complex(self, nodesOP, nodesIn):
         found_complex = False
@@ -521,6 +540,10 @@ class BoundedModule(nn.Module):
             logger.info('Model converted to support bounds')
 
     def set_relu_used_count(self, start_idx):
+        """
+        set the index of alpha of relu we used according to start_idx
+        :param start_idx: start_idx = 99 or 'inf' means the backward starting from the 1st layer
+        """
         # print('start_idx', start_idx)
         layer_idx = 0
         relu_used = 0
@@ -533,17 +556,49 @@ class BoundedModule(nn.Module):
                 # print('we are using single alpha!!')
                 model.relu_used_count = relu_used  # or always = 1 if not using multiple alpha
 
+    def init_slope(self, x):
+        # initial ReLU slope, ie, alpha, by using the "same-slope" with the input x
+
+        # find all ReLU layers
+        bound_relus = []
+        for m in self._modules.values():
+            if isinstance(m, BoundRelu):
+                bound_relus.append(m)
+                m.options = "random_evaluation"
+
+        self.set_relu_used_count(start_idx=99)
+        self.forward(x)  # initial slopes randomly
+
+        for m in bound_relus:
+            m.options = "same-slope"
+
+        with torch.no_grad():
+            self.compute_bounds(x=(x,), IBP=False, C=None, method='backward', return_A=False)
+
+        for m in bound_relus:
+            for si in range(len(m.slope)):
+                m.slope.data[si] = m.d.detach().data  # initial the slopes by CROWN with "same-slope"
+            m.slope.requires_grad = True
+            m.options = "random_evaluation"
+
+        print("init same-slope done")
+
     def get_optimized_bounds(self, x=None, aux=None, C=None, IBP=False, forward=False, method='backward',
                              bound_lower=True, bound_upper=False, reuse_ibp=False, return_A=False, final_node_name=None,
-                             average_A=False, new_interval=None, ):
+                             average_A=False, new_interval=None, opt_lower=True, opt_upper=False):
+        # optimize CROWN lower bound by alpha and beta
 
         iteration = self.ob_iteration; beta = self.ob_beta; alpha = self.ob_alpha; early_stop = self.ob_early_stop
         log = self.ob_log; opt_choice = self.ob_opt_choice; start_idx = self.ob_start_idx; decision_thresh = self.ob_decision_thresh
-        keep_best = self.ob_keep_best; update_by_layer = self.ob_update_by_layer; lr = self.ob_lr
+        keep_best = self.ob_keep_best; update_by_layer = self.ob_update_by_layer; lr = self.ob_lr; init = self.ob_init
 
+        assert opt_lower != opt_upper, 'we can only optimize lower OR upper bound at one time'
         assert alpha or beta, "nothing to optimize, use compute bound instead!"
+
         if not update_by_layer: start_idx = 99
         self.set_relu_used_count(start_idx=start_idx)
+
+        if init: self.init_slope(x)
 
         if opt_choice == "adam":
             lr = 0.5 if iteration > 99 else lr
@@ -585,14 +640,18 @@ class BoundedModule(nn.Module):
 
         start = time.time()
         for i in range(iteration):
-            l, _ = self.compute_bounds(x, aux, C, IBP, forward, method, bound_lower, bound_upper, reuse_ibp,
+            l, u = self.compute_bounds(x, aux, C, IBP, forward, method, bound_lower, bound_upper, reuse_ibp,
                                        return_A=False, final_node_name=final_node_name, average_A=average_A,
                                        new_interval=new_interval if update_by_layer else None)
-            assert l.shape[1] == 1
+            if l.shape[1] != 1:
+                l = l.mean(1)
+                u = u.mean(1)
+
+            loss = l if opt_lower is True else -u
 
             if i == 0 or i == iteration - 1:
-                # print('optimal slope has loss:', l.flatten(), scheduler.get_last_lr())
-                if (l > decision_thresh + 1e-4).all():  # all lower bounds > decision_thresh, no need to optimize
+                # print('optimal slope has loss:', loss.flatten(), scheduler.get_last_lr())
+                if (loss > decision_thresh + 1e-4).all():  # all lower bounds > decision_thresh, no need to optimize
                     print("all verified", decision_thresh)
                     break
 
@@ -600,23 +659,23 @@ class BoundedModule(nn.Module):
             for param_group in opt.param_groups:
                 current_lr.append(param_group['lr'])
             if log:
-                print("iters [", i, "] beta:", [p.sum().item() for p in betas], "l:", l.sum().item(), "lr:", current_lr)
+                print("iters [", i, "] beta:", [p.sum().item() for p in betas], "loss:", loss.sum().item(), "lr:", current_lr)
 
-            l = (-1 * l) * (l < decision_thresh + 1e-4)  # only optimize the lower bounds < decision_thresh
-            l = l.sum()
+            loss = (-1 * loss) * (loss < decision_thresh + 1e-4)  # only optimize the lower bounds < decision_thresh
+            loss = loss.sum()
             # early stop
-            if early_stop and (last_l <= l and iteration < 100):
+            if early_stop and (last_l <= loss and iteration < 100):
                 print('early stop', i)
                 break
 
             if keep_best:
-                if -l > best_l:
-                    best_l = -l
+                if -loss > best_l:
+                    best_l = -loss
                     if alpha: best_alphas = [s.clone().detach() for s in alphas]
                     if beta: best_betas = [b.clone().detach() for b in betas]
 
             opt.zero_grad()
-            l.backward()
+            loss.backward()
 
             opt.step()
 
@@ -632,13 +691,12 @@ class BoundedModule(nn.Module):
                         model.slope.data = torch.clamp(model.slope.data, 0., 1.)
 
                 # for alphaa in alphas:
-                #     print(alphaa, alphaa.grad, l)
+                #     print(alphaa, alphaa.grad, loss)
 
-            # record.append(l.detach().item())
-            # if opt_choice=="default" and (i > 5 or iteration < 100): scheduler.step()
+            # record.append(loss.detach().item())
             scheduler.step()
 
-            last_l = l.detach().clone()
+            last_l = loss.detach().clone()
             self.set_relu_used_count(start_idx=start_idx)
             # print(i, last_l)
 
@@ -690,8 +748,24 @@ class BoundedModule(nn.Module):
             method = 'backward'
             forward = True
         elif method == "crown-optimized":
-            return self.get_optimized_bounds(x=x, IBP=False, C=None, method='backward', new_interval=new_interval,
-                                             bound_lower=bound_lower, bound_upper=bound_upper, return_A=return_A)
+            if self.ob_lower:
+                ret1 = self.get_optimized_bounds(x=x, IBP=False, C=None, method='backward', new_interval=new_interval,
+                                                 bound_lower=bound_lower, bound_upper=bound_upper, return_A=return_A,
+                                                 opt_lower=True, opt_upper=False)
+
+            if self.ob_upper:
+                ret2 = self.get_optimized_bounds(x=x, IBP=False, C=None, method='backward', new_interval=new_interval,
+                                                 bound_lower=bound_lower, bound_upper=bound_upper, return_A=return_A,
+                                                 opt_lower=False, opt_upper=True)
+            if self.ob_lower and self.ob_upper:
+                assert return_A is False
+                return ret1[0], ret2[1]
+            elif self.ob_lower:
+                return ret1
+            elif self.ob_upper:
+                return ret2
+            else:
+                raise NotImplementedError
 
         if not bound_lower and not bound_upper:
             raise ValueError('At least one of bound_lower and bound_upper in compute_bounds should be True')
@@ -706,21 +780,39 @@ class BoundedModule(nn.Module):
         root = [self._modules[name] for name in self.root_name]
         batch_size = root[0].value.shape[0]
         dim_in = 0
+
         for i in range(len(root)):
             value = root[i].forward()
-            if root[i].perturbation is not None:
+            if hasattr(root[i], 'perturbation') and root[i].perturbation is not None:   
                 root[i].linear, root[i].center, root[i].aux = \
                     root[i].perturbation.init(value, aux=aux, forward=forward)
                 # This input/parameter has perturbation. Create an interval object.
-                root[i].lower, root[i].upper = root[i].interval = \
-                    Interval(root[i].linear.lower, root[i].linear.upper, root[i].perturbation)
+                if self.ibp_relative:
+                    root[i].interval = Interval(
+                        None, None, 
+                        root[i].linear.nominal, root[i].linear.lower_offset, root[i].linear.upper_offset)
+                else:
+                    root[i].interval = \
+                        Interval(root[i].linear.lower, root[i].linear.upper, ptb=root[i].perturbation)
                 if forward:
                     root[i].dim = root[i].linear.lw.shape[1]
                     dim_in += root[i].dim
             else:
-                # This inpute/parameter does not has perturbation. Use plain tuple defaulting to Linf perturbation.
-                root[i].interval = (value, value)
-                root[i].forward_value = root[i].fv = root[i].value = root[i].lower = root[i].upper = value
+                if self.ibp_relative:
+                    root[i].interval = Interval(
+                        None, None, 
+                        value, torch.zeros_like(value), torch.zeros_like(value))                    
+                else:
+                    # This inpute/parameter does not has perturbation. 
+                    # Use plain tuple defaulting to Linf perturbation.
+                    root[i].interval = (value, value)
+                    root[i].forward_value = root[i].fv = root[i].value = root[i].lower = root[i].upper = value
+
+            if self.ibp_relative:
+                root[i].lower = root[i].interval.lower
+                root[i].upper = root[i].interval.upper
+            else:
+                root[i].lower, root[i].upper = root[i].interval
 
         if forward:
             self._init_forward(root, dim_in)
@@ -728,20 +820,22 @@ class BoundedModule(nn.Module):
         final = self._modules[self.final_name] if final_node_name is None else self._modules[final_node_name]
         logger.debug('Final node {}[{}]'.format(final, final.name))
 
-        if C is None and (not IBP or method is not None):
-            # C is an identity matrix by default.
-            # For IBP without backward/forward we don't need a C matrix in this case, just leave it as None.
+        if IBP:
+            res = self._IBP_general(node=final, C=C)
+            if self.ibp_relative:
+                self.ibp_lower, self.ibp_upper = res.lower, res.upper
+            else:
+                self.ibp_lower, self.ibp_upper = res
+
+        if method is None:
+            return self.ibp_lower, self.ibp_upper                
+
+        if C is None:
+            # C is an identity matrix by default 
             if final.default_shape is None:
                 raise ValueError('C is not provided while node {} has no default shape'.format(final.shape))
             dim_output = int(np.prod(final.default_shape[1:]))
             C = torch.eye(dim_output).to(self.device).unsqueeze(0).repeat(batch_size, 1, 1)  # TODO: use an eyeC object here.
-
-        if IBP:
-            lower, upper = self._IBP_general(node=final, C=C)
-            self.ibp_lower, self.ibp_upper = lower, upper
-
-        if method is None:
-            return self.ibp_lower, self.ibp_upper
 
         # check whether weights are perturbed and set nonlinear for the BoundMatMul operation
         for n in self._modules.values():
@@ -776,6 +870,7 @@ class BoundedModule(nn.Module):
                     node = self._modules[l_name]
                     # print('node', node, 'lower', hasattr(node, 'lower'), 'perturbed', node.perturbed, 'forward_value', hasattr(node, 'forward_value'), 'fv', hasattr(node, 'fv'), 'from_input', node.from_input)
                     if not hasattr(node, 'lower'):
+                        assert not IBP, 'There should be no missing intermediate bounds when IBP is enabled'
                         if not node.perturbed and hasattr(node, 'forward_value'):
                             node.interval = node.lower, node.upper = \
                                 node.forward_value, node.forward_value
@@ -855,12 +950,11 @@ class BoundedModule(nn.Module):
 
     def _IBP_loss_fusion(self, node, C):
         # not using loss fusion
-        if not (isinstance(self.bound_opts, dict) and \
-                'loss_fusion' in self.bound_opts and self.bound_opts['loss_fusion']):
+        if not (isinstance(self.bound_opts, dict) and self.bound_opts.get('loss_fusion', False)):
             return None
 
         # Currently this function has issues in more complicated networks.
-        if 'no_ibp_loss_fusion' in self.bound_opts and self.bound_opts['no_ibp_loss_fusion']:
+        if self.bound_opts.get('no_ibp_loss_fusion', False):
             return None
 
         if C is None and isinstance(node, BoundSub):
@@ -900,10 +994,16 @@ class BoundedModule(nn.Module):
             return node.interval
 
         if not node.perturbed and hasattr(node, 'forward_value'):
-            node.interval = node.lower, node.upper = node.forward_value, node.forward_value
-            return node.interval
+            node.lower, node.upper = node.interval = (node.forward_value, node.forward_value)
+            
+            if self.ibp_relative:
+                node.interval = Interval(
+                    None, None, 
+                    nominal=node.forward_value, 
+                    lower_offset=torch.zeros_like(node.forward_value), 
+                    upper_offset=torch.zeros_like(node.forward_value))
 
-        logger.debug('IBP at {}[{}]'.format(node, node.name))
+            return node.interval
 
         interval = self._IBP_loss_fusion(node, C)
         if interval is not None:
@@ -924,14 +1024,18 @@ class BoundedModule(nn.Module):
                 node.interval = BoundLinear.interval_propagate(None, *interval_before_C, C=C)
         else:
             node.interval = node.interval_propagate(*inp)
-        node.lower, node.upper = node.interval
-
-        if isinstance(node.lower, torch.Size):
-            node.lower = torch.tensor(node.lower)
-            node.interval = (node.lower, node.upper)
-        if isinstance(node.upper, torch.Size):
-            node.upper = torch.tensor(node.upper)
-            node.interval = (node.lower, node.upper)
+        
+        if self.ibp_relative:
+            node.lower = node.interval.lower
+            node.upper = node.interval.upper
+        else:
+            node.lower, node.upper = node.interval
+            if isinstance(node.lower, torch.Size):
+                node.lower = torch.tensor(node.lower)
+                node.interval = (node.lower, node.upper)
+            if isinstance(node.upper, torch.Size):
+                node.upper = torch.tensor(node.upper)
+                node.interval = (node.lower, node.upper)
 
         return node.interval
 
@@ -1118,12 +1222,12 @@ class BoundedModule(nn.Module):
             else:
                 lA = root[i].lA
                 uA = root[i].uA
-
+                    
             if not isinstance(root[i].lA, eyeC) and not isinstance(root[i].lA, Patches):
                 lA = root[i].lA.reshape(output_dim, batch_size, -1).transpose(0, 1) if bound_lower else None
             if not isinstance(root[i].uA, eyeC) and not isinstance(root[i].lA, Patches):
                 uA = root[i].uA.reshape(output_dim, batch_size, -1).transpose(0, 1) if bound_upper else None
-            if root[i].perturbation is not None:
+            if hasattr(root[i], 'perturbation') and root[i].perturbation is not None:
                 if isinstance(root[i], BoundParams):
                     # add batch_size dim for weights node
                     lb = lb + root[i].perturbation.concretize(
@@ -1149,15 +1253,14 @@ class BoundedModule(nn.Module):
                 else:
                     ub = ub + root[i].fv.view(batch_size, -1) if bound_upper else None
             else:
-                if not isinstance(lA, eyeC):
-                    lb = lb + lA.matmul(root[i].fv.view(-1, 1)).squeeze(-1) if bound_lower else None
-                else:
+                if isinstance(lA, eyeC):
                     lb = lb + root[i].fv.view(1, -1) if bound_lower else None
-                if not isinstance(uA, eyeC):
-                    # FIXME looks questionable
-                    ub = ub + uA.matmul(root[i].fv.view(-1, 1)).squeeze(-1) if bound_upper else None
                 else:
+                    lb = lb + lA.matmul(root[i].fv.view(-1, 1)).squeeze(-1) if bound_lower else None                    
+                if isinstance(uA, eyeC):
                     ub = ub + root[i].fv.view(1, -1) if bound_upper else None
+                else:
+                    ub = ub + uA.matmul(root[i].fv.view(-1, 1)).squeeze(-1) if bound_upper else None
 
         node.lower = lb.view(batch_size, *output_shape) if bound_lower else None
         node.upper = ub.view(batch_size, *output_shape) if bound_upper else None
@@ -1220,9 +1323,9 @@ class BoundedModule(nn.Module):
                 lA = lw.reshape(batch_size, dim_in, -1).transpose(1, 2)
                 uA = uw.reshape(batch_size, dim_in, -1).transpose(1, 2)
                 for i in range(len(root)):
-                    if root[i].perturbation is not None:
-                        _lA = lA[:, :, prev_dim_in: (prev_dim_in + root[i].dim)]
-                        _uA = uA[:, :, prev_dim_in: (prev_dim_in + root[i].dim)]
+                    if hasattr(root[i], 'perturbation') and root[i].perturbation is not None:
+                        _lA = lA[:, :, prev_dim_in : (prev_dim_in + root[i].dim)]
+                        _uA = uA[:, :, prev_dim_in : (prev_dim_in + root[i].dim)]
                         lower = lower + root[i].perturbation.concretize(
                             root[i].center, _lA, sign=-1, aux=root[i].aux).view(lower.shape)
                         upper = upper + root[i].perturbation.concretize(
@@ -1240,7 +1343,7 @@ class BoundedModule(nn.Module):
         prev_dim_in = 0
         batch_size = root[0].fv.shape[0]
         for i in range(len(root)):
-            if root[i].perturbation is not None:
+            if hasattr(root[i], 'perturbation') and root[i].perturbation is not None:
                 shape = root[i].linear.lw.shape
                 device = root[i].linear.lw.device
                 root[i].linear = root[i].linear._replace(

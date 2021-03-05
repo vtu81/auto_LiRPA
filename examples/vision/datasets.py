@@ -26,6 +26,13 @@ def get_stats(loader):
 
 # load MNIST of Fashion-MNIST
 def mnist_loaders(dataset, batch_size, shuffle_train = True, shuffle_test = False, ratio=None, test_batch_size=None):
+    """Fix 403 Forbidden error in downloading MNIST
+    See https://github.com/pytorch/vision/issues/1938."""
+    from six.moves import urllib
+    opener = urllib.request.build_opener()
+    opener.addheaders = [('User-agent', 'Mozilla/5.0')]
+    urllib.request.install_opener(opener)
+
     mnist_train = dataset("./data", train=True, download=True, transform=transforms.ToTensor())
     mnist_test = dataset("./data", train=False, download=True, transform=transforms.ToTensor())
 

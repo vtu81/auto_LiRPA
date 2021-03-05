@@ -25,20 +25,23 @@ def not_implemented_op(node, func):
 """Interval object. Used for interval bound propagation."""
 class Interval(tuple):
     # Subclassing tuple object so that all previous code can be reused.
-    def __new__(self, lb=None, ub=None, ptb=None):
-        # FIXME: for the issue in model loading
-        if ub is None:
-            assert (isinstance(lb, tuple))
-            lb, ub = lb
-
+    def __new__(self, lb=None, ub=None, nominal=None, lower_offset=None, upper_offset=None, ptb=None):
         return tuple.__new__(Interval, (lb, ub))
 
-    def __init__(self, lb, ub, ptb=None):
+    def __init__(self, lb, ub, nominal=None, lower_offset=None, upper_offset=None, ptb=None):
+        self.nominal = nominal
+        self.lower_offset = lower_offset
+        self.upper_offset = upper_offset
+
         if ptb is None:
-            # We do not perturb this interval. It shall be treated as a constant and lb = ub.
             self.ptb = None
-            # To avoid mistakes, in this case the caller must make sure lb and ub are the same object.
-            assert lb is ub
+            # If relative bounds are not used, `self.ptb == None` means that this interval
+            # is not perturbed and it shall be treated as a constant and lb = ub.
+            # But if relative bounds are used, every node in IBP is supposed to have an `Interval` object
+            # even if this node is perturbed.
+            if nominal is None:
+                # To avoid mistakes, in this case the caller must make sure lb and ub are the same object.
+                assert lb is ub
         else:
             if not isinstance(ptb, Perturbation):
                 raise ValueError("ptb must be a Perturbation object or None. Got type {}".format(type(ptb)))
@@ -51,28 +54,43 @@ class Interval(tuple):
     def __repr__(self):
         return "Interval(lb={}, ub={}, ptb={})".format(self[0], self[1], self.ptb)
 
+    @property
+    def lower(self):
+        return self.nominal + self.lower_offset
+
+    @property
+    def upper(self):
+        return self.nominal + self.upper_offset
+
     """Checking if the other interval is tuple, keep the perturbation."""
 
     @staticmethod
-    def make_interval(lb, ub, other=None):
+    def make_interval(lb, ub, other=None, nominal=None, use_relative=False):
         if isinstance(other, Interval):
-            return Interval(lb, ub, other.ptb)
+            return Interval(lb, ub, ptb=other.ptb)
         else:
-            return (lb, ub)
+            if use_relative:
+                if nominal is None:
+                    return Interval(
+                        None, None, (lb + ub) / 2, (lb - ub) / 2, (ub - lb) / 2)
+                else:
+                    return Interval(None, None, nominal, lb - nominal, ub - nominal)
+            else:
+                return (lb, ub)
 
     """Given a tuple or Interval object, returns the norm and eps."""
 
     @staticmethod
     def get_perturbation(interval):
-        if isinstance(interval, Interval):
+        if isinstance(interval, Interval) and interval.ptb is not None:
             if isinstance(interval.ptb, PerturbationLpNorm):
                 return interval.ptb.norm, interval.ptb.eps
             elif isinstance(interval.ptb, PerturbationSynonym):
                 return np.inf, 1.0
             elif isinstance(interval.ptb, PerturbationL0Norm):
                 return 0, interval.ptb.eps, interval.ptb.ratio
-            elif interval.ptb is None:
-                raise RuntimeError("get_perturbation() encountered an interval that is not perturbed.")
+            # elif interval.ptb is None:
+            #     raise RuntimeError("get_perturbation() encountered an interval that is not perturbed.")
             else:
                 raise RuntimeError("get_perturbation() does not know how to handle {}".format(type(interval.ptb)))
         else:
@@ -87,6 +105,16 @@ class Interval(tuple):
             return False
         else:
             return True
+
+    @staticmethod
+    def use_relative_bounds(*intervals):
+        using = True
+        for interval in intervals:
+            using = using and (
+                isinstance(interval, Interval) and 
+                interval.nominal is not None and 
+                interval.lower_offset is not None and interval.upper_offset is not None)
+        return using
 
 
 class Bound(nn.Module):
@@ -126,7 +154,15 @@ class Bound(nn.Module):
         if len(v) == 0:
             return Interval.make_interval(self.forward(), self.forward())
         elif len(v) == 1:
-            return Interval.make_interval(self.forward(v[0][0]), self.forward(v[0][1]), v[0])
+            if Interval.use_relative_bounds(v[0]):
+                return Interval(
+                    None, None,
+                    self.forward(v[0].nominal), 
+                    self.forward(v[0].lower_offset), 
+                    self.forward(v[0].upper_offset)
+                )
+            else:
+                return Interval.make_interval(self.forward(v[0][0]), self.forward(v[0][1]), v[0])
         else:
             raise NotImplementedError('default_interval_propagate only supports no more than 1 input node')
 
@@ -287,6 +323,14 @@ class BoundReshape(Bound):
         return LinearBound(lw, lb, uw, ub)
 
     def interval_propagate(self, *v):
+        if Interval.use_relative_bounds(*v):
+            return Interval(
+                None, None,
+                v[0].nominal.reshape(self.shape),
+                v[0].lower_offset.reshape(self.shape),
+                v[0].upper_offset.reshape(self.shape),
+                ptb=v[0].ptb
+            )
         return Interval.make_interval(v[0][0].reshape(*v[1][0]), v[0][1].reshape(*v[1][0]), v[0])
 
     def infer_batch_dim(self, batch_size, *x):
@@ -680,7 +724,27 @@ class BoundLinear(Bound):
         return [(lA_x, uA_x), (lA_y, uA_y)], lbias, ubias
 
     @staticmethod
-    def _propogate_Linf(h_L, h_U, w):
+    def _propagate_Linf(x, w):
+        if Interval.use_relative_bounds(x):
+            if len(x.nominal.shape) == 2 and w.ndim == 3:
+                nominal = torch.bmm(x.nominal.unsqueeze(1), w.transpose(-1, -2)).squeeze(1)
+                lower_offset = (
+                    torch.bmm(x.lower_offset.unsqueeze(1), w.clamp(min=0).transpose(-1, -2)) + 
+                    torch.bmm(x.upper_offset.unsqueeze(1), w.clamp(max=0).transpose(-1, -2))).squeeze(1)
+                upper_offset = (
+                    torch.bmm(x.lower_offset.unsqueeze(1), w.clamp(max=0).transpose(-1, -2)) + 
+                    torch.bmm(x.upper_offset.unsqueeze(1), w.clamp(min=0).transpose(-1, -2))).squeeze(1)
+            else:
+                nominal = x.nominal.matmul(w.transpose(-1, -2))
+                lower_offset = (
+                    x.lower_offset.matmul(w.clamp(min=0).transpose(-1, -2)) + 
+                    x.upper_offset.matmul(w.clamp(max=0).transpose(-1, -2)))
+                upper_offset = (
+                    x.lower_offset.matmul(w.clamp(max=0).transpose(-1, -2)) + 
+                    x.upper_offset.matmul(w.clamp(min=0).transpose(-1, -2)))
+            return Interval(None, None, nominal, lower_offset, upper_offset)
+
+        h_L, h_U = x
         mid = (h_L + h_U) / 2
         diff = (h_U - h_L) / 2
         w_abs = w.abs()
@@ -696,11 +760,18 @@ class BoundLinear(Bound):
         has_bias = len(v) == 3
         if self is not None:
             # This will convert an Interval object to tuple. We need to add perturbation property later.
-            v_lb, v_ub = zip(*v)
-            v_lb = self._preprocess(*v_lb)
-            v_ub = self._preprocess(*v_ub)
-            # After preprocess the lower and upper bounds, we make them Intervals again.
-            v = [Interval.make_interval(bounds[0], bounds[1], bounds[2]) for bounds in zip(v_lb, v_ub, v)]
+            if Interval.use_relative_bounds(v[0]):
+                v_nominal = self._preprocess(v[0].nominal, v[1].nominal, v[2].nominal)
+                v_lower_offset = self._preprocess(v[0].lower_offset, v[1].lower_offset, v[2].lower_offset)
+                v_upper_offset = self._preprocess(v[0].upper_offset, v[1].upper_offset, v[2].upper_offset)
+                v = [Interval(None, None, bounds[0], bounds[1], bounds[2]) 
+                    for bounds in zip(v_nominal, v_lower_offset, v_upper_offset)]
+            else:
+                v_lb, v_ub = zip(*v)
+                v_lb = self._preprocess(*v_lb)
+                v_ub = self._preprocess(*v_ub)
+                # After preprocess the lower and upper bounds, we make them Intervals again.
+                v = [Interval.make_interval(bounds[0], bounds[1], bounds[2]) for bounds in zip(v_lb, v_ub, v)]
         if w is None and self is None:
             # Use C as the weight, no bias.
             w, lb, ub = C, torch.tensor(0., device=C.device), torch.tensor(0., device=C.device)
@@ -711,16 +782,26 @@ class BoundLinear(Bound):
                     # w is a perturbed tensor. Use IBP with weight perturbation.
                     # C matrix merging not supported.
                     assert C is None
-                    l, u = self.interval_propagate_with_weight(*v)
-                    if has_bias:
-                        return l + v[2][0], u + v[2][1]
+                    res = self.interval_propagate_with_weight(*v)
+                    if Interval.use_relative_bounds(res):
+                        if has_bias:
+                            raise NotImplementedError
+                        else:
+                            return res
                     else:
-                        return l, u
+                        l, u = res
+                        if has_bias:
+                            return l + v[2][0], u + v[2][1]
+                        else:
+                            return l, u
                 else:
                     # Use weight 
-                    w = v[1][0]
+                    if Interval.use_relative_bounds(v[1]):
+                        w = v[1].nominal
+                    else:
+                        w = v[1][0]
             if has_bias:
-                lb, ub = v[2]
+                lb, ub = (v[2].lower, v[2].upper) if Interval.use_relative_bounds(v[2]) else v[2]
             else:
                 lb = ub = 0.0
 
@@ -730,16 +811,17 @@ class BoundLinear(Bound):
                 ub = C.matmul(ub) if not isinstance(ub, float) else ub
 
         # interval_propagate() of the Linear layer may encounter input with different norms.
-        norm = Interval.get_perturbation(v[0])
-        norm = norm[0]
+        norm, eps = Interval.get_perturbation(v[0])
         if norm == np.inf:
-            norm, eps = Interval.get_perturbation(v[0])
-            h_L, h_U = v[0]
-
-            if hasattr(self, 'detach_ibp_pre') and self.detach_ibp_pre:
-                h_L, h_U = h_L.detach(), h_U.detach()
-
-            center, deviation = BoundLinear._propogate_Linf(h_L, h_U, w)
+            interval = BoundLinear._propagate_Linf(v[0], w)
+            if isinstance(interval, Interval):
+                b_center = (lb + ub) / 2
+                interval.nominal += b_center
+                interval.lower_offset += lb - b_center
+                interval.upper_offset += ub - b_center
+                return interval
+            else:
+                center, deviation = interval
         elif norm > 0:
             # General Lp norm.
             norm, eps = Interval.get_perturbation(v[0])
@@ -770,11 +852,38 @@ class BoundLinear(Bound):
 
         lower, upper = center - deviation + lb, center + deviation + ub
 
-        return lower, upper
+        return (lower, upper)
 
     def interval_propagate_with_weight(self, *v):
         input_norm, input_eps = Interval.get_perturbation(v[0])
-        weight_norm, weight_eps = Interval.get_perturbation(v[1])
+        weight_norm, weight_eps = Interval.get_perturbation(v[1])        
+
+        if Interval.use_relative_bounds(*v):
+            assert input_norm == weight_norm == np.inf
+            assert self.opt_matmul == 'economic'
+            
+            x, y = v[0], v[1]
+
+            nominal = x.nominal.matmul(y.nominal.transpose(-1, -2))
+
+            matmul_offset = torch.matmul(
+                torch.max(x.lower_offset.abs(), x.upper_offset.abs()),
+                torch.max(y.upper_offset.abs(), y.lower_offset.abs()).transpose(-1, -2))
+
+            lower_offset = (
+                x.nominal.clamp(min=0).matmul(y.lower_offset.transpose(-1, -2)) + 
+                x.nominal.clamp(max=0).matmul(y.upper_offset.transpose(-1, -2)) + 
+                x.lower_offset.matmul(y.nominal.clamp(min=0).transpose(-1, -2)) + 
+                x.upper_offset.matmul(y.nominal.clamp(max=0).transpose(-1, -2)) - matmul_offset)
+            
+            upper_offset = (
+                x.nominal.clamp(min=0).matmul(y.upper_offset.transpose(-1, -2)) + 
+                x.nominal.clamp(max=0).matmul(y.lower_offset.transpose(-1, -2)) + 
+                x.upper_offset.matmul(y.nominal.clamp(min=0).transpose(-1, -2)) + 
+                x.lower_offset.matmul(y.nominal.clamp(max=0).transpose(-1, -2)) + matmul_offset)
+
+            return Interval(None, None, nominal, lower_offset, upper_offset)
+
         self.x_shape = v[0][0].shape
         self.y_shape = v[1][0].shape
 
@@ -818,7 +927,7 @@ class BoundLinear(Bound):
             # Input data and weight are Linf perturbed (with upper and lower bounds).
             h_L, h_U = v[0]
             # First, handle non-perturbed weight with Linf perturbed data.
-            center, deviation = BoundLinear._propogate_Linf(h_L, h_U, v[1][0])
+            center, deviation = BoundLinear._propagate_Linf(v[0], v[1][0])
             # Compute the maximal L2 norm of data. Size is [batch, 1].
             max_l2 = torch.max(h_L.abs(), h_U.abs()).norm(2, dim=-1).unsqueeze(-1)
             # Add the L2 eps to bounds.
@@ -923,8 +1032,8 @@ class BoundBatchNormalization(Bound):
             return F.batch_norm(x, m, v, w, b, self.training, self.momentum, self.eps)
 
     def bound_backward(self, last_lA, last_uA, *x):
-        assert (not self.is_input_perturbed(1) and not self.is_input_perturbed(2), 
-            'Weight perturbation is not supported for BoundBatchNormalization')
+        assert not self.is_input_perturbed(1) and not self.is_input_perturbed(2), \
+            'Weight perturbation is not supported for BoundBatchNormalization'
 
         # x[0]: input, x[1]: weight, x[2]: bias, x[3]: running_mean, x[4]: running_var
         weight, bias = x[1].param, x[2].param
@@ -937,7 +1046,10 @@ class BoundBatchNormalization(Bound):
                 return None, 0
             if type(last_A) == torch.Tensor:
                 next_A = last_A * tmp_weight.view(*((1, 1, -1) + (1,) * (last_A.ndim - 3)))
-                sum_bias = (last_A.sum(tuple(range(3, last_A.ndim))) * tmp_bias).sum(2)
+                if last_A.ndim > 3:
+                    sum_bias = (last_A.sum(tuple(range(3, last_A.ndim))) * tmp_bias).sum(2)
+                else:
+                    sum_bias = (last_A * tmp_bias).sum(2)
             elif type(last_A) == Patches:
                 # TODO Only 4-dim BN supported in the Patches mode
                 if last_A.identity == 0:
@@ -962,8 +1074,8 @@ class BoundBatchNormalization(Bound):
         return [(lA, uA), (None, None), (None, None), (None, None), (None, None)], lbias, ubias
 
     def interval_propagate(self, *v):
-        assert (not self.is_input_perturbed(1) and not self.is_input_perturbed(2), 
-            'Weight perturbation is not supported for BoundBatchNormalization')
+        assert not self.is_input_perturbed(1) and not self.is_input_perturbed(2), \
+            'Weight perturbation is not supported for BoundBatchNormalization'
 
         h_L, h_U = v[0]
         weight, bias = v[1][0], v[2][0]
@@ -1092,12 +1204,71 @@ class BoundConv(Bound):
         uA_x, ubias = _bound_oneside(last_uA)
         return [(lA_x, uA_x), (lA_y, uA_y), (lA_bias, uA_bias)], lbias, ubias
 
+    def bound_forward(self, dim_in, *x):
+        if self.is_input_perturbed(1):
+            raise NotImplementedError("Weight perturbation for convolution layers has not been implmented.")
+
+        weight = x[1].lb
+        bias = x[2].lb if self.has_bias else None
+        x = x[0]
+        input_dim = x.lb.shape[-2] * x.lb.shape[-1]
+        wshape = x.lw.shape
+        wshape_conv = (wshape[0] * wshape[1], *wshape[2:])        
+        eye = torch.eye(input_dim).view(input_dim, 1, *x.lb.shape[-2:])
+        weight = F.conv2d(eye, weight, None, self.stride, self.padding, self.dilation, self.groups)
+        weight = weight.view(input_dim, -1)
+        output_dim = weight.shape[-1]
+        bias = bias.view(1, -1, 1).repeat(1, 1, output_dim // bias.shape[0]).view(*self.output_shape)
+        batch_size = x.lb.shape[0]
+
+        lw = (x.lw.reshape(batch_size, dim_in, -1).matmul(weight.clamp(min=0)) + 
+            x.uw.reshape(batch_size, dim_in, -1).matmul(weight.clamp(max=0)))\
+            .reshape(batch_size, dim_in, *self.output_shape) 
+        uw = (x.uw.reshape(batch_size, dim_in, -1).matmul(weight.clamp(min=0)) + 
+            x.lw.reshape(batch_size, dim_in, -1).matmul(weight.clamp(max=0)))\
+            .reshape(batch_size, dim_in, *self.output_shape) 
+        
+        lb = (x.lb.reshape(batch_size, -1).matmul(weight.clamp(min=0)) + 
+            x.ub.reshape(batch_size, -1).matmul(weight.clamp(max=0)))\
+            .reshape(batch_size, *self.output_shape) + bias
+        ub = (x.ub.reshape(batch_size, -1).matmul(weight.clamp(min=0)) + 
+            x.lb.reshape(batch_size, -1).matmul(weight.clamp(max=0)))\
+            .reshape(batch_size, *self.output_shape) + bias
+
+        return LinearBound(lw, lb, uw, ub)
+
     def interval_propagate(self, *v, C=None):
         if self.is_input_perturbed(1):
             raise NotImplementedError("Weight perturbation for convolution layers has not been implmented.")
 
         norm = Interval.get_perturbation(v[0])
         norm = norm[0]
+
+        if Interval.use_relative_bounds(*v):
+            bias = v[2].nominal if self.has_bias else None
+            if norm == np.inf:
+                weight = v[1].nominal
+                nominal = F.conv2d(
+                    v[0].nominal, weight, bias, 
+                    self.stride, self.padding, self.dilation, self.groups)
+                lower_offset = (F.conv2d(
+                                    v[0].lower_offset, weight.clamp(min=0), None,
+                                    self.stride, self.padding, self.dilation, self.groups) + 
+                                F.conv2d(
+                                    v[0].upper_offset, weight.clamp(max=0), None,
+                                    self.stride, self.padding, self.dilation, self.groups))
+                upper_offset = (F.conv2d(
+                                    v[0].upper_offset, weight.clamp(min=0), None,
+                                    self.stride, self.padding, self.dilation, self.groups) + 
+                                F.conv2d(
+                                    v[0].lower_offset, weight.clamp(max=0), None,
+                                    self.stride, self.padding, self.dilation, self.groups))
+                return Interval(
+                    None, None, nominal=nominal, 
+                    lower_offset=lower_offset, upper_offset=upper_offset
+                )
+            else:
+                raise NotImplementedError
 
         h_L, h_U = v[0]
         weight = v[1][0]
@@ -1285,6 +1456,15 @@ class BoundConcat(Bound):
         all_inf = all(map(lambda x: x is None or x == np.inf, norms))
         all_2 = all(map(lambda x: x is None or x == 2, norms))
 
+        if Interval.use_relative_bounds(*v):
+            assert all_inf # Only LINF supported for now
+            return Interval(
+                None, None,
+                self.forward(*[_v.nominal for _v in v]),
+                self.forward(*[_v.lower_offset for _v in v]),
+                self.forward(*[_v.upper_offset for _v in v]),
+            )
+
         h_L = [_v[0] for _v in v]
         h_U = [_v[1] for _v in v]
         if all_inf:
@@ -1297,7 +1477,7 @@ class BoundConcat(Bound):
             # For L2 norm perturbed inputs, lb=ub and for constants lb=ub. Just propagate one object.
             r = self.forward(*h_L)
             ptb = PerturbationLpNorm(norm=2, eps=max_eps)
-            return Interval(r, r, ptb)
+            return Interval(r, r, ptb=ptb)
         else:
             raise RuntimeError("BoundConcat does not support inputs with norm {}".format(norms))
 
@@ -1366,6 +1546,14 @@ class BoundAdd(Bound):
 
     def interval_propagate(self, x, y):
         assert (not isinstance(y, torch.Tensor))
+
+        if Interval.use_relative_bounds(x) and Interval.use_relative_bounds(y):
+            return Interval(
+                None, None, 
+                x.nominal + y.nominal,
+                x.lower_offset + y.lower_offset,
+                x.upper_offset + y.upper_offset)
+
         return x[0] + y[0], x[1] + y[1]
 
     def infer_batch_dim(self, batch_size, *x):
@@ -1401,6 +1589,13 @@ class BoundSub(Bound):
         return LinearBound(lw, lb, uw, ub)
 
     def interval_propagate(self, x, y):
+        if Interval.use_relative_bounds(x) and Interval.use_relative_bounds(y):
+            return Interval(
+                None, None, 
+                x.nominal - y.nominal,
+                x.lower_offset - y.upper_offset,
+                x.upper_offset - y.lower_offset)
+
         return x[0] - y[1], x[1] - y[0]
 
     def infer_batch_dim(self, batch_size, *x):
@@ -1555,6 +1750,10 @@ class BoundActivation(Bound):
 
         return LinearBound(lw, lb, uw, ub)
 
+    def interval_propagate(self, *v):
+        h_L, h_U = v[0][0], v[0][1]
+        return self.forward(h_L), self.forward(h_U)
+
     def infer_batch_dim(self, batch_size, *x):
         return x[0]
 
@@ -1615,9 +1814,10 @@ class BoundRelu(BoundActivation):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.options = options.get('relu')
 
-        if self.options == "random_evaluation":
-            self.slope = None
-            self.relu_used_count = 1
+        # if self.options == "random_evaluation":
+        self.slope = None
+        self.relu_used_count = 1
+        self.final_shape = options.get('final_shape')
 
         self.beta = None
         self.beta_mask = None
@@ -1626,9 +1826,20 @@ class BoundRelu(BoundActivation):
         self.slope = None
 
     def _init_slope(self, x):
-        # self.slope = torch.ones_like(x, dtype=torch.float).to(x.device)
-        self.slope = torch.ones([self.relu_used_count, *x.shape], dtype=torch.float).to(x.device)
-        self.slope.requires_grad_(True)
+        if self.final_shape[-1] == 1:  # single output
+            # self.slope = torch.ones_like(x, dtype=torch.float).to(x.device)
+            self.slope = torch.ones([self.relu_used_count, *x.shape], dtype=torch.float).to(x.device)
+            self.slope.requires_grad_(True)
+        else:
+            assert len(self.final_shape) == 2
+            # initial multiple slopes when output dim > 1, we use a larger tensor with self.final_shape[-1] times expansion
+            self.slope = torch.ones([self.final_shape[-1], self.relu_used_count, *x.shape], dtype=torch.float).to(x.device)
+            # self.slope = []
+            # for i in range(self.relu_used_count):
+            #     if i == 0:
+            #         self.slope.append(torch.ones([self.final_shape[-1], *x.shape], dtype=torch.float).to(x.device))
+            #     else:
+            #         self.slope.append(torch.ones([1, *x.shape], dtype=torch.float).to(x.device))
 
     def forward(self, x):
         if self.options == "random_evaluation":
@@ -1686,12 +1897,18 @@ class BoundRelu(BoundActivation):
 
         self.I = ((lb_r != 0) * (ub_r != 0)).detach()  # unstable neurons
 
-        ub_r = torch.max(ub_r, lb_r + 1e-8)
-        upper_d = ub_r / (ub_r - lb_r)
+        if hasattr(x, 'interval') and Interval.use_relative_bounds(x.interval):
+            diff_x = x.interval.upper_offset - x.interval.lower_offset
+            upper_d = (self.interval.upper_offset - self.interval.lower_offset) / diff_x.clamp(min=epsilon)
+            mask_tiny_diff = (diff_x <= epsilon).float()
+            upper_d = mask_tiny_diff * F.relu(x.upper) + (1 - mask_tiny_diff) * upper_d
+        else:
+            ub_r = torch.max(ub_r, lb_r + 1e-8)
+            upper_d = ub_r / (ub_r - lb_r)
         upper_b = - lb_r * upper_d
 
         use_lower_b = False
-
+        flag_expand = False
         if self.options == "same-slope":
             # the same slope for upper and lower
             lower_d = upper_d
@@ -1707,7 +1924,16 @@ class BoundRelu(BoundActivation):
             self.relu_used_count -= 1
             idx = max(self.relu_used_count, 0)
             # print('idx', idx)
-            lower_d = self.slope[idx].clamp(min=0.0, max=1.0)
+            if self.final_shape[-1] == 1:
+                lower_d = self.slope[idx].clamp(min=0.0, max=1.0)
+            elif idx == 0 and self.final_shape[-1] != 1:
+                # print(self.slope[idx].shape, last_lA.shape)
+                # if the output dim > 1, we use multiple slopes for each dim at the last CROWN backward
+                lower_d = self.slope[:, idx].clamp(min=0.0, max=1.0)
+            else:
+                # for the intermediate bounds, we share same slope, 0-dim here
+                lower_d = self.slope[0, idx].clamp(min=0.0, max=1.0)
+
             # lower_d = self.slope.clone().clamp(min=0.0, max=1.0)
             if x is not None:
                 lower = x.lower
@@ -1715,17 +1941,24 @@ class BoundRelu(BoundActivation):
             else:
                 lower = self.lower
                 upper = self.upper
-            lower_d[lower >= 0] = 1.0
-            lower_d[upper <= 0] = 0.0
+            if idx == 0 and self.final_shape[-1] != 1:
+                lower_d[:, lower >= 0] = 1.0
+                lower_d[:, upper <= 0] = 0.0
+                flag_expand = True
+            else:
+                lower_d[lower >= 0] = 1.0
+                lower_d[upper <= 0] = 0.0
         else:
+            # adaptive
             lower_d = (upper_d > 0.5).float()
 
-        upper_d = upper_d.unsqueeze(0)
-        lower_d = lower_d.unsqueeze(0)
+        self.d = upper_d
+
+        if not flag_expand:
+            upper_d = upper_d.unsqueeze(0)
+            lower_d = lower_d.unsqueeze(0)
 
         # Choose upper or lower bounds based on the sign of last_A
-        uA = lA = None
-
         def _bound_oneside(last_A, d_pos, d_neg, b_pos, b_neg):
             if last_A is None:
                 return None, 0
@@ -1807,15 +2040,19 @@ class BoundRelu(BoundActivation):
         ###### make sure that nonzero beta mask will only be negative 0 or positive 1 for uA and lA
         ###### assert uA[nonzero beta mask] == lA[nonzero beta mask]
 
-        self.d = upper_d.squeeze(0)
         return [(lA, uA)], lbias, ubias
 
     def interval_propagate(self, *v):
+        if Interval.use_relative_bounds(*v):
+            nominal = F.relu(v[0].nominal)
+            mask_nominal = (nominal > 0).float()
+            mask_l = (v[0].lower > 0).float()
+            mask_u = (v[0].upper > 0).float()
+            lower_offset = mask_nominal * (mask_l * v[0].lower_offset + (1 - mask_l) * (-nominal))
+            upper_offset = mask_nominal * v[0].upper_offset + (1 - mask_nominal) * mask_u * v[0].upper
+            return Interval(None, None, nominal, lower_offset, upper_offset)
+
         h_L, h_U = v[0][0], v[0][1]
-        guard_eps = 1e-5
-        self.unstable = ((h_L < -guard_eps) & (h_U > guard_eps))
-        self.upper = h_U
-        self.lower = h_L
 
         if self.options == "random_evaluation":
             if self.slope is None:
@@ -1945,6 +2182,15 @@ class BoundSigmoid(BoundTanh):
         self.bound_relax_impl(x, torch.sigmoid, self.dsigmoid)
 
 
+class BoundSoftplus(BoundActivation):
+    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
+        super(BoundSoftplus, self).__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+        self.softplus = nn.Softplus()
+
+    def forward(self, x):
+        return self.softplus(x) 
+
+
 class BoundExp(BoundActivation):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
@@ -1959,6 +2205,17 @@ class BoundExp(BoundActivation):
 
     def interval_propagate(self, *v):
         assert (len(v) == 1)
+
+        if Interval.use_relative_bounds(*v):
+            assert not self.loss_fusion or self.options == 'no-max-input'
+            nominal = torch.exp(v[0].nominal)
+            return Interval(
+                None, None,
+                nominal,
+                nominal * (torch.exp(v[0].lower_offset) - 1),
+                nominal * (torch.exp(v[0].upper_offset) - 1)
+            )
+
         # unary monotonous functions only
         h_L, h_U = v[0]
         if self.loss_fusion and self.options != 'no-max-input':
@@ -2060,9 +2317,15 @@ class BoundLog(BoundActivation):
     def interval_propagate(self, *v):
         # NOTE adhoc implementation for loss fusion
         if self.loss_fusion:
-            lower = torch.logsumexp(self.inputs[0].inputs[0].inputs[0].lower, dim=-1) 
-            upper = torch.logsumexp(self.inputs[0].inputs[0].inputs[0].upper, dim=-1) 
-            return lower, upper
+            par = self.inputs[0].inputs[0].inputs[0]
+            if Interval.use_relative_bounds(*v):
+                lower = torch.logsumexp(par.interval.nominal + par.interval.lower_offset, dim=-1) 
+                upper = torch.logsumexp(par.interval.nominal + par.interval.upper_offset, dim=-1) 
+                return Interval.make_interval(lower, upper, nominal=self.forward_value, use_relative=True)
+            else:
+                lower = torch.logsumexp(par.lower, dim=-1) 
+                upper = torch.logsumexp(par.upper, dim=-1) 
+                return lower, upper
         return super().interval_propagate(*v)
 
     def bound_backward(self, last_lA, last_uA, x):
@@ -2132,6 +2395,7 @@ class BoundUnsqueeze(Bound):
         elif self.axes > x[0]:
             return x[0]
         raise NotImplementedError
+    
 
 
 class BoundSqueeze(Bound):
@@ -2245,7 +2509,6 @@ class BoundConstant(Bound):
         lb = ub = self.value
         return LinearBound(lw, lb, uw, ub)
 
-
 class BoundShape(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
@@ -2264,6 +2527,18 @@ class BoundShape(Bound):
 
     def infer_batch_dim(self, batch_size, *x):
         return -1
+
+    def interval_propagate(self, *v):
+        if Interval.use_relative_bounds(*v):
+            shape = self.forward(v[0].nominal)
+            if not isinstance(shape, torch.Tensor):
+                shape = torch.tensor(shape, device=self.device)
+            return Interval(
+                None, None,
+                shape, torch.zeros_like(shape), torch.zeros_like(shape)
+            )
+
+        return super().interval_propagate(*v)
 
 
 class BoundGather(Bound):
@@ -2327,6 +2602,16 @@ class BoundGather(Bound):
         return LinearBound(lw, lb, uw, ub)
 
     def interval_propagate(self, *v):
+        assert not self.is_input_perturbed(1)
+
+        if Interval.use_relative_bounds(*v):
+            return Interval(
+                None, None,
+                self.forward(v[0].nominal, v[1].nominal),
+                self.forward(v[0].lower_offset, v[1].nominal),
+                self.forward(v[0].upper_offset, v[1].nominal)
+            )
+        
         return self.forward(v[0][0], v[1][0]), self.forward(v[0][1], v[1][0])
 
     def infer_batch_dim(self, batch_size, *x):
@@ -2372,6 +2657,16 @@ class BoundGatherElements(Bound):
         return [(_bound_oneside(last_lA), _bound_oneside(last_uA)), (None, None)], 0, 0
 
     def interval_propagate(self, *v):
+        assert not self.is_input_perturbed(1)
+
+        if Interval.use_relative_bounds(*v):
+            return Interval(
+                None, None,
+                self.forward(v[0].nominal, v[1].nominal),
+                self.forward(v[0].lower_offset, v[1].nominal),
+                self.forward(v[0].upper_offset, v[1].nominal)
+            )
+
         return self.forward(v[0][0], v[1][0]), \
                self.forward(v[0][1], v[1][1])
 
@@ -2628,6 +2923,22 @@ class BoundMul(Bound):
             l = F.relu(h_L) - F.relu(-h_U)
             return l * l, torch.max(r0, r1)
 
+        if Interval.use_relative_bounds(x) and Interval.use_relative_bounds(y):
+            nominal = x.nominal * y.nominal
+            lower_offset = (
+                x.nominal.clamp(min=0) * (y.lower_offset) + 
+                x.nominal.clamp(max=0) * (y.upper_offset) + 
+                y.nominal.clamp(min=0) * (x.lower_offset) + 
+                y.nominal.clamp(max=0) * (x.upper_offset) + 
+                torch.min(x.lower_offset * y.upper_offset, x.upper_offset * y.lower_offset))
+            upper_offset = (
+                x.nominal.clamp(min=0) * (y.upper_offset) + 
+                x.nominal.clamp(max=0) * (y.lower_offset) + 
+                y.nominal.clamp(min=0) * (x.upper_offset) + 
+                y.nominal.clamp(max=0) * (x.lower_offset) + 
+                torch.max(x.lower_offset * y.lower_offset, x.upper_offset * y.upper_offset))
+            return Interval(None, None, nominal=nominal, lower_offset=lower_offset, upper_offset=upper_offset)
+
         r0, r1, r2, r3 = x[0] * y[0], x[0] * y[1], x[1] * y[0], x[1] * y[1]
         lower = torch.min(torch.min(r0, r1), torch.min(r2, r3))
         upper = torch.max(torch.max(r0, r1), torch.max(r2, r3))
@@ -2650,6 +2961,18 @@ class BoundDiv(Bound):
         self.nonlinear = True
 
     def forward(self, x, y):
+        # ad-hoc implementation for layer normalization
+        if isinstance(self.inputs[1], BoundSqrt):
+            input = self.inputs[0].inputs[0]
+            x = input.forward_value
+            n = input.forward_value.shape[-1]
+
+            dev = x * (1. - 1. / n) - (x.sum(dim=-1, keepdim=True) - x) / n
+            dev_sqr = dev ** 2
+            s = (dev_sqr.sum(dim=-1, keepdim=True) - dev_sqr) / dev_sqr.clamp(min=epsilon)
+            sqrt = torch.sqrt(1. / n * (s + 1))
+            return torch.sign(dev) * (1. / sqrt)
+
         self.x, self.y = x, y
         return x / y
 
@@ -2670,9 +2993,55 @@ class BoundDiv(Bound):
         return mul.bound_forward(dim_in, x, y_r_linear)
 
     def interval_propagate(self, *v):
+        # ad-hoc implementation for layer normalization
+        """
+        Compute bounds for layer normalization
+
+        Lower bound
+            1) (x_i - mu) can be negative
+                - 1 / ( sqrt (1/n * sum_j Lower{(x_j-mu)^2/(x_i-mu)^2} ))
+            2) (x_i - mu) cannot be negative
+                1 / ( sqrt (1/n * sum_j Upper{(x_j-mu)^2/(x_i-mu)^2} ))
+
+        Lower{(x_j-mu)^2/(x_i-mu)^2}
+            Lower{sum_j (x_j-mu)^2} / Upper{(x_i-mu)^2} 
+
+        Upper{(x_j-mu)^2/(x_i-mu)^2}
+            Upper{sum_j (x_j-mu)^2} / Lower{(x_i-mu)^2}     
+        """        
+        if isinstance(self.inputs[1], BoundSqrt):
+            input = self.inputs[0].inputs[0]
+            n = input.forward_value.shape[-1]
+            
+            h_L, h_U = input.lower, input.upper
+
+            dev_lower = (
+                h_L * (1 - 1. / n) - 
+                (h_U.sum(dim=-1, keepdim=True) - h_U) / n
+            )
+            dev_upper = (
+                h_U * (1 - 1. / n) - 
+                (h_L.sum(dim=-1, keepdim=True) - h_L) / n
+            )
+
+            dev_sqr_lower = (1 - (dev_lower < 0).float() * (dev_upper > 0).float()) * \
+                torch.min(dev_lower.abs(), dev_upper.abs())**2 
+            dev_sqr_upper = torch.max(dev_lower.abs(), dev_upper.abs())**2
+
+            sum_lower = (dev_sqr_lower.sum(dim=-1, keepdim=True) - dev_sqr_lower) / dev_sqr_upper.clamp(min=epsilon)
+            sqrt_lower = torch.sqrt(1. / n * (sum_lower + 1))
+            sum_upper = (dev_sqr_upper.sum(dim=-1, keepdim=True) - dev_sqr_upper) / \
+                dev_sqr_lower.clamp(min=epsilon)
+            sqrt_upper = torch.sqrt(1. / n * (sum_upper + 1))
+
+            lower = (dev_lower < 0).float() * (-1. / sqrt_lower) + (dev_lower > 0).float() * (1. / sqrt_upper)
+            upper = (dev_upper > 0).float() * (1. / sqrt_lower) + (dev_upper < 0).float() * (-1. / sqrt_upper)
+
+            return lower, upper
+
         x, y = v[0], v[1]
-        y_r = BoundReciprocal.interval_propagate(None, y)
-        return BoundMul.interval_propagate(x, y_r)
+        assert (y[0] > 0).all()
+        return x[0] / y[1], x[1] / y[0]
 
     def _convert_to_mul(self, x, y):
         try:
@@ -3008,7 +3377,6 @@ class BoundReduceSum(Bound):
         assert not x[0] in self.axis
         return x[0]
 
-
 class BoundDropout(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
@@ -3117,6 +3485,20 @@ class BoundPow(Bound):
 
     def interval_propagate(self, *v):
         assert not self.is_input_perturbed(1)
+
+        if Interval.use_relative_bounds(*v):
+            exp = v[1].nominal
+            assert exp == int(exp)
+            exp = int(exp)
+            h_L = v[0].nominal + v[0].lower_offset
+            h_U = v[0].nominal + v[0].upper_offset
+            lower, upper = torch.pow(h_L, exp), torch.pow(h_U, exp)
+            if exp % 2 == 0:
+                lower, upper = torch.min(lower, upper), torch.max(lower, upper)
+                mask = 1 - ((h_L < 0) * (h_U > 0)).float()
+                lower = lower * mask
+            return Interval.make_interval(lower, upper, nominal=self.forward_value, use_relative=True)
+
         exp = v[1][0]
         assert exp == int(exp)
         exp = int(exp)
@@ -3142,6 +3524,15 @@ class BoundSqrt(BoundActivation):
 
     def infer_batch_dim(self, batch_size, *x):
         return x[0]
+
+    def interval_propagate(self, *v):
+        if Interval.use_relative_bounds(*v):
+            nominal = self.forward(v[0].nominal)
+            lower_offset = self.forward(v[0].nominal + v[0].lower_offset) - nominal
+            upper_offset = self.forward(v[0].nominal + v[0].upper_offset) - nominal
+            return Interval(None, None, nominal, lower_offset, upper_offset)            
+
+        return super().interval_propagate(*v)
 
 
 class BoundExpand(Bound):
@@ -3177,6 +3568,15 @@ class BoundWhere(Bound):
 
     def interval_propagate(self, *v):
         assert not self.is_input_perturbed(0)
+
+        if Interval.use_relative_bounds(*v):
+            return Interval(
+                None, None,
+                self.forward(v[0].nominal, v[1].nominal, v[2].nominal),
+                self.forward(v[0].nominal, v[1].lower_offset, v[2].lower_offset),
+                self.forward(v[0].nominal, v[1].upper_offset, v[2].upper_offset)
+            )
+
         condition = v[0][0]
         return tuple([torch.where(condition, v[1][j], v[2][j]) for j in range(2)])
 
@@ -3374,6 +3774,18 @@ class BoundATenDiagonal(Bound):
     def interval_propagate(self, *v):
         params = (v[1][0], v[2][0], v[3][0])
         return Interval.make_interval(torch.diagonal(v[0][0], *params), torch.diagonal(v[0][1], *params), v[0])
+
+    def infer_batch_dim(self, batch_size, *x):
+        return x[0]
+
+class BoundFlatten(Bound):
+    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
+        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+        self.use_default_ibp = True
+        self.axis = attr['axis']
+
+    def forward(self, x):
+        return torch.flatten(x, self.axis)
 
     def infer_batch_dim(self, batch_size, *x):
         return x[0]

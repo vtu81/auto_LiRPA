@@ -36,6 +36,7 @@ def get_exp_module(bounded_module):
 
 
 parser = argparse.ArgumentParser()
+# python cifar_training.py --bound_type=IBP --model=cnn_6layer 
 
 parser.add_argument("--verify", action="store_true", help='verification mode, do not train')
 parser.add_argument("--no_loss_fusion", action="store_true", help='without loss fusion, slower training mode')
@@ -224,7 +225,7 @@ def main(args):
     if args.data == 'MNIST':
         model_ori = models.Models[args.model](in_ch=1, in_dim=28)
     else:
-        model_ori = models.Models[args.model]()
+        model_ori = models.Models[args.model](in_ch=3, in_dim=32)
     epoch = 0
     if args.load:
         checkpoint = torch.load(args.load)

@@ -38,7 +38,7 @@ def namedtuple_with_defaults(name, attr, defaults):
 Patches = namedtuple_with_defaults('Patches', ('patches', 'stride', 'padding', 'shape', 'identity'), defaults=(None, 1, 0, None, 0))
 BoundList = namedtuple_with_defaults('BoundList', ('bound_list'), defaults=([],))
 # Linear bounds with coefficients. Used for forward bound propagation.
-LinearBound = namedtuple_with_defaults('LinearBound', ('lw', 'lb', 'uw', 'ub', 'lower', 'upper', 'from_input'), defaults=(None,) * 7)
+LinearBound = namedtuple_with_defaults('LinearBound', ('lw', 'lb', 'uw', 'ub', 'lower', 'upper', 'from_input', 'nominal', 'lower_offset', 'upper_offset'), defaults=(None,) * 10)
 
 # for debugging
 if False:
@@ -49,7 +49,10 @@ if False:
 
 user_data_dir = appdirs.user_data_dir('auto_LiRPA')
 if not os.path.exists(user_data_dir):
-    os.makedirs(user_data_dir)
+    try:
+        os.makedirs(user_data_dir)
+    except:
+        logger.error('Failed to create directory {}'.format(user_data_dir))
 lockutils.set_defaults(os.path.join(user_data_dir, '.lock'))
 
 class AverageMeter(object):
