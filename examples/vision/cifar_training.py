@@ -242,11 +242,11 @@ def main(args):
 
     ## Step 2: Prepare dataset as usual
     if args.data == 'MNIST':
-        dummy_input = torch.randn(1, 1, 28, 28)
+        dummy_input = torch.randn(2, 1, 28, 28)
         train_data = datasets.MNIST("./data", train=True, download=True, transform=transforms.ToTensor())
         test_data = datasets.MNIST("./data", train=False, download=True, transform=transforms.ToTensor())
     elif args.data == 'CIFAR':
-        dummy_input = torch.randn(1, 3, 32, 32)
+        dummy_input = torch.randn(2, 3, 32, 32)
         normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010])
         train_data = datasets.CIFAR10("./data", train=True, download=True,
                 transform=transforms.Compose([

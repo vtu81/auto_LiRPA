@@ -73,10 +73,10 @@ class Test1DActivation(TestCase):
         for i in range(ntests):
             show = False
             if output_ub[0,i] < ref_output_ub[0,i] - 1e-5:
-                logger.warn('upper bound is wrong')
+                logger.warn(f'upper bound is wrong {ref_output_ub[0,i] - output_ub[0,i]}')
                 show = True
             if output_lb[0,i] > ref_output_lb[0,i] + 1e-5:
-                logger.warn('lower bound is wrong')
+                logger.warn(f'lower bound is wrong {output_lb[0,i] - ref_output_lb[0,i]}')
                 show = True
             if show:
                 logger.warn(f'input_lb={input_lb[0,i]:8.3f}, input_ub={input_ub[0,i]:8.3f}, lb={output_lb[0,i]:8.3f}, ref_lb={ref_output_lb[0,i]:8.3f}, ub={output_ub[0,i]:8.3f}, ref_ub={ref_output_ub[0,i]:8.3f}')

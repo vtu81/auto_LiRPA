@@ -19,7 +19,7 @@ class TestWeightPerturbation(TestCase):
 
     def test_training(self):
         ret = subprocess.run(
-            ['python', 'weights_training.py', 
+            ['python', 'weight_perturbation_training.py', 
             '--device', 'cpu',
             '--scheduler_opts', 'start=1,length=100',
             '--num_epochs',  '1', 
