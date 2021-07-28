@@ -15,6 +15,10 @@ from auto_LiRPA.perturbations import *
 from auto_LiRPA.utils import *
 from auto_LiRPA.adam_element_lr import AdamElementLR
 
+import warnings
+
+warnings.simplefilter("once")
+
 Check_against_base_lp = False  # A debugging option, used for checking against LPs. Will be removed.
 Check_against_base_lp_layer = '/21'  # Check for bounds in this layer ('/9', '/11', '/21')
 
@@ -1579,6 +1583,8 @@ class BoundedModule(nn.Module):
                                             reduced_dim = True
                                             # print(f'layer {node.name} total {dim} unstable {max_non_zero} newC {newC.size()}')
                                         else:
+                                            if dim > 1000:
+                                                warnings.warn("node {} creates a newC with dim {}".format(node, dim))
                                             newC = torch.eye(dim, device=self.device) \
                                                 .unsqueeze(0).repeat(batch_size, 1, 1) \
                                                 .view(batch_size, dim, *node.output_shape[1:])

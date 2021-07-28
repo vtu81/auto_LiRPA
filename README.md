@@ -1,6 +1,7 @@
 # auto_LiRPA: Automatic Linear Relaxation based Perturbation Analysis for Neural Networks
 
 ![](https://travis-ci.com/KaidiXu/auto_LiRPA.svg?token=HM3jb55xV1sMRsVKBr8b&branch=master&status=started)
+[![Documentation Status](https://readthedocs.org/projects/auto-lirpa/badge/?version=latest)](https://auto-lirpa.readthedocs.io/en/latest/?badge=latest)
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](http://PaperCode.cc/AutoLiRPA-Demo)
 [![Video Introduction](https://img.shields.io/badge/play-video-red.svg)](http://PaperCode.cc/AutoLiRPA-Video)
 [![BSD license](https://img.shields.io/badge/License-BSD-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
@@ -123,10 +124,7 @@ We provide a wide range of examples of using `auto_LiRPA`:
 * [Certifiably Robust Language Classifier using **Transformers**](doc/examples.md#certifiably-robust-language-classifier-with-transformer-and-lstm)
 * [Certified Robustness against **Model Weight Perturbations**](doc/examples.md#certified-robustness-against-model-weight-perturbations-and-certified-defense)
 
-[See also the API document for important functions and interfaces in
-`auto_LiRPA`](https://auto-lirpa.readthedocs.io/en/latest/).  
-For reproducing [our NeurIPS 2020
-paper](https://arxiv.org/abs/2002.12920) result see this [guide](doc/paper.md).
+See also the [full documentation](https://auto-lirpa.readthedocs.io) with [API documentation](https://auto-lirpa.readthedocs.io/en/latest/api.html) for important functions and interfaces in `auto_LiRPA`. For reproducing [our NeurIPS 2020 paper](https://arxiv.org/abs/2002.12920) result see this [guide](doc/paper.md).
 
 ## Publications
 

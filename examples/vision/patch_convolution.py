@@ -9,6 +9,31 @@ from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
 import models
 
+class cnn_4layer_b(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.paddingA = (3,1,3,1)
+        self.paddingB = (2,2,1,3)
+
+        self.padA = nn.ZeroPad2d(self.paddingA)
+        self.padB = nn.ZeroPad2d(self.paddingB)
+
+        self.conv1 = nn.Conv2d(3, 32, (5,5), stride=2, padding=0)
+        self.conv2 = nn.Conv2d(32, 128, (4,4), stride=2, padding=1)
+
+        self.linear = None
+        self.fc = nn.Linear(250, 10)
+
+    def forward(self, x):
+        x = self.padA(x)
+        x = self.conv1(x)
+        x = self.conv2(F.relu(x))
+        x = F.relu(x)
+        x = x.view(x.size(0), -1)
+        if self.linear is None:
+            self.linear = nn.Linear(x.size(1), 250)
+        x = self.linear(x)
+        return self.fc(F.relu(x))
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -174,7 +199,7 @@ np.random.seed(seed)
 # model_ori = models.model_resnet(width=1, mult=4)
 # model_ori = models.ResNet18(in_planes=2)
 # model_ori.load_state_dict(torch.load("data/cifar_base_kw.pth")['state_dict'][0])
-model_ori = cifar_conv_small()
+model_ori = cnn_4layer_b()
 for m in model_ori.modules():
     if isinstance(m, nn.BatchNorm2d):
         m.running_mean.data.copy_(torch.randn_like(m.running_mean))
@@ -198,6 +223,7 @@ image = image.to(torch.float32) / 255.0
 if device == 'cuda':
     image = image.cuda()
 
+model_ori(image)
 ## Step 3: wrap model with auto_LiRPA
 # The second parameter is for constructing the trace of the computational graph, and its content is not important.
 # The new "patches" conv_mode provides an more efficient implementation for convolutional neural networks.

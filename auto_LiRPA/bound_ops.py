@@ -1397,10 +1397,13 @@ class BoundConv(Bound):
                     sum_bias = x[2].lower.unsqueeze(0).unsqueeze(2).unsqueeze(3).transpose(0, 1)
                 else:
                     raise NotImplementedError()
-                padding = last_A.padding if last_A is not None else 0  # FIXME: support asymmetric padding.
+                padding = last_A.padding if last_A is not None else (0, 0, 0, 0)  # (left, right, top, bottom)
                 stride = last_A.stride if last_A is not None else 1
 
-                padding = padding * self.stride[0] + self.padding[0]
+                if type(padding) == int:
+                    padding = padding * self.stride[0] + self.padding[0]
+                else:
+                    padding = (p * self.stride[0] + self.padding[0] for p in padding)
                 stride *= self.stride[0]
 
                 if pieces.shape[-1] > self.input_shape[-1]: # the patches is too large and from now on, we will use matrix mode instead of patches mode.
@@ -1976,7 +1979,7 @@ class BoundPad(Bound):
                 return None
             assert type(last_A) is Patches or last_A.ndim == 5
             if type(last_A) is Patches:
-                new_padding = (last_A.padding + left, last_A.padding + right, last_A.padding + top, last_A.padding + bottom)   # FIXME: fully support different padding size on each side.
+                new_padding = (last_A.padding + left, last_A.padding + right, last_A.padding + top, last_A.padding + bottom)
                 return Patches(last_A.patches, last_A.stride, new_padding, last_A.shape, last_A.identity)
             else:
                 shape = last_A.size()
