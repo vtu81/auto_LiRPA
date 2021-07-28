@@ -18,7 +18,7 @@
 # -- Project information -----------------------------------------------------
 
 project = 'auto_LiRPA'
-copyright = '2021, auto_LiRPA authors'
+copyright = '2021, <a href="https://github.com/KaidiXu/auto_LiRPA#developers-and-copyright">auto_LiRPA authors</a>'
 author = 'auto_LiRPA authors'
 
 
@@ -28,7 +28,8 @@ author = 'auto_LiRPA authors'
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
 extensions = [
-    'sphinx.ext.autodoc'
+    'sphinx.ext.autodoc',
+    'm2r',
 ]
 
 # Add any paths that contain templates here, relative to this directory.

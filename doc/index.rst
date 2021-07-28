@@ -3,34 +3,24 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Welcome to auto_LiRPA's documentation!
+Documentation for `auto_LiRPA <https://github.com/KaidiXu/auto_LiRPA>`_
 ======================================
 
-.. toctree::
-   :maxdepth: 2
-   :caption: Contents:
+.. raw:: html
 
-.. autoclass:: auto_LiRPA.BoundedModule
+   <p align="center">
+   <a href="http://PaperCode.cc/AutoLiRPA-Video"><img src="http://www.huan-zhang.com/images/upload/lirpa/auto_lirpa_2.png" width="45%" height="45%" float="left"></a>
+   <a href="http://PaperCode.cc/AutoLiRPA-Video"><img src="http://www.huan-zhang.com/images/upload/lirpa/auto_lirpa_1.png" width="45%" height="45%" float="right"></a>
+   </p>
 
-   .. autofunction:: auto_LiRPA.BoundedModule.compute_bounds
 
-.. autoclass:: auto_LiRPA.bound_ops.Bound
+.. mdinclude:: introduction.md
 
-   .. autofunction:: auto_LiRPA.bound_ops.Bound.forward
-   .. autofunction:: auto_LiRPA.bound_ops.Bound.interval_propagate
-   .. autofunction:: auto_LiRPA.bound_ops.Bound.bound_forward
-   .. autofunction:: auto_LiRPA.bound_ops.Bound.bound_backward
+Usage
+-----
 
-.. autoclass:: auto_LiRPA.perturbations.Perturbation
+* `Installation <https://github.com/KaidiXu/auto_LiRPA#installation>`_
+* `Quick Start <https://github.com/KaidiXu/auto_LiRPA#quick-start>`_
+* `More Working Examples <https://github.com/KaidiXu/auto_LiRPA#more-working-examples>`_
+* :doc:`API Usage <api>`
 
-   .. autofunction:: auto_LiRPA.perturbations.Perturbation.concretize
-   .. autofunction:: auto_LiRPA.perturbations.Perturbation.init
-
-Indices and tables
-==================
-
-* :ref:`genindex`
-* :ref:`search`
-
-..
-   * :ref:`modindex`
