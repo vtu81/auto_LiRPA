@@ -10,6 +10,7 @@ setup(
     packages=['auto_LiRPA'],
     install_requires=[
         'torch>=1.8,<1.9',
+        'torchvision>=0.9,<0.10',
         'numpy>=1.16',
         'packaging>=20.0',
         'pytest>=5.0',
