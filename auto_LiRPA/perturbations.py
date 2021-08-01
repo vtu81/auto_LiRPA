@@ -4,7 +4,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
-from auto_LiRPA.utils import logger, eyeC, LinearBound, Patches, BoundList, patchesToMatrix
+from auto_LiRPA.utils import logger, eyeC, LinearBound, Patches, BoundList, patchesToMatrix, check_padding
 import torch.nn.functional as F
 
 class Perturbation:
@@ -66,6 +66,7 @@ class Perturbation:
         raise NotImplementedError
 
 
+"""Perturbation constrained by the L_0 norm (assuming input data is in the range of 0-1)."""
 class PerturbationL0Norm(Perturbation):
     def __init__(self, eps, x_L = None, x_U = None, ratio = 1.0):
         self.eps = eps
@@ -97,6 +98,7 @@ class PerturbationL0Norm(Perturbation):
             A_diff[pos_mask] = original[pos_mask]
             A_diff[neg_mask] = original[neg_mask] - A[neg_mask]
 
+        # FIXME: this assumes the input pixel range is between 0 and 1!
         A_diff, _= torch.sort(A_diff, dim = 2, descending=True)
 
         bound = center + sign * A_diff[:, :, :eps].sum(dim = 2).unsqueeze(2) * self.ratio
@@ -204,12 +206,8 @@ class PerturbationLpNorm(Perturbation):
                 diff = (x_U - x_L) / 2.0
                 if not A.identity == 1:
                     # unfold the input as [batch_size, L, in_c * H * W]
-                    if isinstance(A.padding, tuple) and len(A.padding) == 4:
-                        # Asymmetric padding.
-                        padded_center = F.pad(center, A.padding)
-                        unfold_input = F.unfold(padded_center, kernel_size=A.patches.size(-1), padding = 0, stride = A.stride).transpose(-2, -1)
-                    else:
-                        unfold_input = F.unfold(center, kernel_size=A.patches.size(-1), padding = A.padding, stride = A.stride).transpose(-2, -1)
+                    padded_center, padding = check_padding(center, A.padding)
+                    unfold_input = F.unfold(padded_center, kernel_size=A.patches.size(-1), padding = padding, stride = A.stride).transpose(-2, -1)
                     # reshape the input as [batch_size, L, 1, in_c, H, W]
                     unfold_input = unfold_input.view(unfold_input.size(0), unfold_input.size(1), -1, A.patches.size(-3), A.patches.size(-2), A.patches.size(-1))
 

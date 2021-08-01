@@ -30,7 +30,7 @@ class cnn_4layer_b(nn.Module):
     def forward(self, x):
         x = self.padA(x)
         x = self.conv1(x)
-        x = self.conv2(F.relu(x))
+        x = self.conv2(self.padB(F.relu(x)))
         x = F.relu(x)
         x = x.view(x.size(0), -1)
         if self.linear is None:
@@ -45,66 +45,67 @@ class TestDistinctPatches(TestCase):
             generate=generate)
 
     def test(self):
-        paddingA = tuple(n for n in np.random.randint(0,4,2))
-        paddingB = tuple(n for n in np.random.randint(0,4,2))
+        cases = [(2,1,2,1), (0,0,0,0), (1,3,3,1), (2,2,3,1)]
+        for i in range(4):
+            for j in range(4):
+                paddingA = cases[i]
+                paddingB = cases[j]
 
-        paddingA = (paddingA[0], 4 - paddingA[0], paddingA[1], 4 - paddingA[1])
-        paddingB = (paddingB[0], 4 - paddingB[0], paddingB[1], 4 - paddingB[1])
 
-        print(paddingA, paddingB)
+                print(paddingA, paddingB)
 
-        model_ori = cnn_4layer_b(paddingA, paddingB)
+                model_ori = cnn_4layer_b(paddingA, paddingB)
 
-        conv_mode = 'patches' # conv_mode can be set as 'matrix' or 'patches'        
-            
-        normalize = torchvision.transforms.Normalize(mean = [0.4914, 0.4822, 0.4465], std = [0.2023, 0.1994, 0.2010])
-        test_data = torchvision.datasets.CIFAR10("./data", train=False, download=True, 
-                        transform=torchvision.transforms.Compose([torchvision.transforms.ToTensor(), normalize]))
-        N = 1
-        n_classes = 10
+                conv_mode = 'patches' # conv_mode can be set as 'matrix' or 'patches'        
+                    
+                normalize = torchvision.transforms.Normalize(mean = [0.4914, 0.4822, 0.4465], std = [0.2023, 0.1994, 0.2010])
+                test_data = torchvision.datasets.CIFAR10("./data", train=False, download=True, 
+                                transform=torchvision.transforms.Compose([torchvision.transforms.ToTensor(), normalize]))
+                N = 1
+                n_classes = 10
 
-        seed = 1234
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        random.seed(seed)
-        np.random.seed(seed)
+                seed = 1234
+                torch.manual_seed(seed)
+                torch.cuda.manual_seed_all(seed)
+                random.seed(seed)
+                np.random.seed(seed)
 
-        image = torch.Tensor(test_data.data[:N]).reshape(N,3,32,32)
-        image = image.to(torch.float32) / 255.0
-        pred = model_ori(image)
-        for m in model_ori.modules():
-            if isinstance(m, nn.BatchNorm2d):
-                m.running_mean.data.copy_(torch.randn_like(m.running_mean))
-                m.running_var.data.copy_(torch.abs(torch.randn_like(m.running_var)))
+                image = torch.Tensor(test_data.data[:N]).reshape(N,3,32,32)
+                image = image.to(torch.float32) / 255.0
+                pred = model_ori(image)
+                for m in model_ori.modules():
+                    if isinstance(m, nn.BatchNorm2d):
+                        m.running_mean.data.copy_(torch.randn_like(m.running_mean))
+                        m.running_var.data.copy_(torch.abs(torch.randn_like(m.running_var)))
 
-        model = BoundedModule(model_ori, image, bound_opts={"conv_mode": conv_mode})
+                model = BoundedModule(model_ori, image, bound_opts={"conv_mode": conv_mode})
 
-        ptb = PerturbationLpNorm(norm = np.inf, eps = 0.03)
-        image = BoundedTensor(image, ptb)
-        lb, ub = model.compute_bounds(x=(image,), IBP=False, C=None, method='backward')
+                ptb = PerturbationLpNorm(norm = np.inf, eps = 0.03)
+                image = BoundedTensor(image, ptb)
+                lb, ub = model.compute_bounds(x=(image,), IBP=False, C=None, method='backward')
 
-        # matrix mode
-        conv_mode = 'matrix'
+                # matrix mode
+                conv_mode = 'matrix'
 
-        seed = 1234
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        random.seed(seed)
-        np.random.seed(seed)
-        for m in model_ori.modules():
-            if isinstance(m, nn.BatchNorm2d):
-                m.running_mean.data.copy_(torch.randn_like(m.running_mean))
-                m.running_var.data.copy_(torch.abs(torch.randn_like(m.running_var)))
-        model = BoundedModule(model_ori, image, bound_opts={"conv_mode": conv_mode})
+                seed = 1234
+                torch.manual_seed(seed)
+                torch.cuda.manual_seed_all(seed)
+                random.seed(seed)
+                np.random.seed(seed)
+                for m in model_ori.modules():
+                    if isinstance(m, nn.BatchNorm2d):
+                        m.running_mean.data.copy_(torch.randn_like(m.running_mean))
+                        m.running_var.data.copy_(torch.abs(torch.randn_like(m.running_var)))
+                model = BoundedModule(model_ori, image, bound_opts={"conv_mode": conv_mode})
 
-        ptb = PerturbationLpNorm(norm = np.inf, eps = 0.03)
-        image = BoundedTensor(image, ptb)
-        pred = model(image)
+                ptb = PerturbationLpNorm(norm = np.inf, eps = 0.03)
+                image = BoundedTensor(image, ptb)
+                pred = model(image)
 
-        lb_ref, ub_ref = model.compute_bounds(x=(image,), IBP=False, C=None, method='backward')
+                lb_ref, ub_ref = model.compute_bounds(x=(image,), IBP=False, C=None, method='backward')
 
-        assert torch.allclose(lb, lb_ref)
-        assert torch.allclose(ub, ub_ref)
+                assert torch.allclose(lb, lb_ref)
+                assert torch.allclose(ub, ub_ref)
         
 
 if __name__ == '__main__':

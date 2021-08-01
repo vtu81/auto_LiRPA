@@ -1,10 +1,6 @@
 API Usage
 ======================================
 
-.. toctree::
-   :maxdepth: 2
-   :caption: Contents:
-
 .. autoclass:: auto_LiRPA.BoundedModule
 
    .. autofunction:: auto_LiRPA.BoundedModule.compute_bounds
@@ -22,7 +18,7 @@ API Usage
    .. autofunction:: auto_LiRPA.perturbations.Perturbation.init
 
 Indices and tables
-==================
+-------------------
 
 * :ref:`genindex`
 * :ref:`search`

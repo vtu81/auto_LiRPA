@@ -23,7 +23,26 @@ Check_against_base_lp = False  # A debugging option, used for checking against L
 Check_against_base_lp_layer = '/21'  # Check for bounds in this layer ('/9', '/11', '/21')
 
 class BoundedModule(nn.Module):
-    """Bounded modules with support for automatically computing bounds.
+    """Bounded module with support for automatically computing bounds.
+
+    Args:
+        model (nn.Module): The original model to be wrapped by BoundedModule.
+
+        global_input (tuple): A dummy input to the original model. The shape of 
+        the dummy input should be consistent with the actual input to the model 
+        except for the batch dimension.
+
+        bound_opts (dict): Options for bounds. See 
+        `Bound Options <bound_opts.html>`_.
+
+        device (str or torch.device): Device of the bounded module. 
+        If 'auto', the device will be automatically inferred from the device of 
+        parameters in the original model or the dummy input.
+
+        custom_ops (dict): A dictionary of custom operators. 
+        The dictionary maps operator names to their corresponding bound classes 
+        (subclasses of `Bound`).
+
     """
     def __init__(self, model, global_input, bound_opts={}, auto_batch_dim=True, device='auto',
                  verbose=False, custom_ops={}):
@@ -69,7 +88,7 @@ class BoundedModule(nn.Module):
                                'ob_loss_reduction_func': reduction_sum, 
                                'ob_stop_criterion_func': lambda x: False,
                                'ob_input_grad': False,
-                               'ob_lr_decay': 0.98, 'ob_lr_dynamic_decay': None }
+                               'ob_lr_decay': 0.98 }
         # change by bound_opts
         optimize_bound_args.update(self.bound_opts.get('optimize_bound_args', {}))
         self.bound_opts.update({'optimize_bound_args': optimize_bound_args})
@@ -822,8 +841,7 @@ class BoundedModule(nn.Module):
                                         intermediate_layer]['ub'].data[i, ..., :saved_n_betas] = \
                                     intermediate_betas['ub']
                                 else:
-                                    print(
-                                        f"Warning: the intermediate bounds of sample {i} split {split_layer} layer {intermediate_layer} are not optimized, but initialization contains it with size {saved_n_betas}. It might be a bug.")
+                                    warnings.warn(f"Warning: the intermediate bounds of sample {i} split {split_layer} layer {intermediate_layer} are not optimized, but initialization contains it with size {saved_n_betas}. It might be a bug.", stacklevel=2)
 
                             elif intermediate_layer in self._modules[split_layer].history_intermediate_betas:
                                 # Here we assume the last intermediate beta is the last split, which will still be 0.
@@ -835,8 +853,7 @@ class BoundedModule(nn.Module):
                                     intermediate_layer]['ub'].data[i, ..., :saved_n_betas] = \
                                 intermediate_betas['ub']
                             else:
-                                print(
-                                    f"Warning: the intermediate bounds of sample {i} split {split_layer} layer {intermediate_layer} are not optimized, but initialization contains it. It might be a bug.")
+                                warnings.warn(f"Warning: the intermediate bounds of sample {i} split {split_layer} layer {intermediate_layer} are not optimized, but initialization contains it. It might be a bug.", stacklevel=2)
 
         return beta_constraint_specs, all_intermediate_betas, needed_A_list
 
@@ -916,12 +933,11 @@ class BoundedModule(nn.Module):
         opt_coeffs = opts['ob_opt_coeffs']; opt_bias = opts['ob_opt_bias']
         verbose = opts['ob_verbose']; opt_choice = opts['ob_optimizer']
         single_node_split = opts['ob_single_node_split'] 
-        keep_best = opts['ob_keep_best']; update_by_layer = opts['ob_update_by_layer']; lr = opts['ob_lr']; init = opts['ob_init']
-        lr_beta = opts['ob_lr_beta']
+        keep_best = opts['ob_keep_best']; update_by_layer = opts['ob_update_by_layer']; init = opts['ob_init']
+        lr = opts['ob_lr']; lr_beta = opts['ob_lr_beta']
         lr_intermediate_beta = opts['ob_lr_intermediate_beta']
         intermediate_beta_enabled = opts['ob_intermediate_beta']
-        lr_decay = opts['ob_lr_decay']; lr_dynamic_decay = opts['ob_lr_dynamic_decay']
-        lr_coeffs = opts['ob_lr_coeffs'] 
+        lr_decay = opts['ob_lr_decay']; lr_coeffs = opts['ob_lr_coeffs'] 
         loss_reduction_func = opts['ob_loss_reduction_func']
         stop_criterion_func = opts['ob_stop_criterion_func']
         input_grad = opts['ob_input_grad']
@@ -1007,14 +1023,14 @@ class BoundedModule(nn.Module):
             opt = AdamElementLR(parameters, lr=lr)
         elif opt_choice == "adam":
             opt = optim.Adam(parameters, lr=lr)
-        else:
+        elif opt_choices == 'sgd':
             opt = optim.SGD(parameters, lr=lr, momentum=0.9)
+        else:
+            raise NotImplementedError(opt_choices)
         # Create a weight vector to scale learning rate.
         loss_weight = torch.ones(size=(x[0].size(0),), device=x[0].device)
 
-        # scheduler = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=5, eta_min=0.1)
-        if lr_dynamic_decay is None:
-            scheduler = optim.lr_scheduler.ExponentialLR(opt, lr_decay)
+        scheduler = optim.lr_scheduler.ExponentialLR(opt, lr_decay)
 
         last_l = math.inf
         last_total_loss = torch.tensor(1e8, device=x[0].device, dtype=x[0].dtype)
@@ -1234,12 +1250,7 @@ class BoundedModule(nn.Module):
                         if beta and single_node_split:
                             betas[ii][worse_idx] = best_betas[ii][worse_idx].clone().detach()
 
-            if lr_dynamic_decay is None:
-                scheduler.step()
-            else:
-                if loss > last_l:
-                    for p in opt.param_groups: 
-                        p['lr'] *= lr_dynamic_decay
+            scheduler.step()
             last_l = loss.item()
             last_total_loss = total_loss.detach().clone()
 
@@ -1292,7 +1303,8 @@ class BoundedModule(nn.Module):
         r"""Main function for computing bounds.
 
         Args:
-            x (tuple): Input to the model. The number of elements in the tuple should be 
+            x (tuple or None): Input to the model. If it is None, the input from the last 
+            `forward` or `compute_bounds` call is reused. Otherwise: the number of elements in the tuple should be 
             equal to the number of input nodes in the model, and each element in the tuple 
             corresponds to the value for each input node respectively. It should look similar 
             as the `global_input` argument when used for creating a `BoundedModule`.
@@ -1312,9 +1324,6 @@ class BoundedModule(nn.Module):
                 * `Forward`: purely use forward mode LiRPA to compute the bounds.
                 * `Forward+Backward`: use forward mode LiRPA to compute bounds for intermediate nodes, but further use CROWN to compute bounds for the final node.
                 * `CROWN-Optimized` or `alpha-CROWN`: use CROWN, and also optimize the linear relaxation parameters for activations.
-
-            custom_ops: A dictionary of custom operators. 
-            The dictionary maps operator names to their corresponding bound classes (subclasses of `Bound`).
 
             IBP (bool, optional): If `True`, use IBP to compute the bounds of intermediate nodes.
             It can be automatically set according to `method`.
@@ -1584,7 +1593,7 @@ class BoundedModule(nn.Module):
                                             # print(f'layer {node.name} total {dim} unstable {max_non_zero} newC {newC.size()}')
                                         else:
                                             if dim > 1000:
-                                                warnings.warn("node {} creates a newC with dim {}".format(node, dim))
+                                                warnings.warn(f"Creating an identity matrix with size {dim}x{dim} for node {node}. This may indicate poor performance for bound computation. If you see this message on a small network please submit a bug report.", stacklevel=2)
                                             newC = torch.eye(dim, device=self.device) \
                                                 .unsqueeze(0).repeat(batch_size, 1, 1) \
                                                 .view(batch_size, dim, *node.output_shape[1:])

@@ -13,8 +13,9 @@
 
 ## What's New?
 
-- [Optimized CROWN/LiRPA](https://arxiv.org/pdf/2011.13824.pdf) bound (α-CROWN) for ReLU, **sigmoid**, **tanh**, and **maxpool** activation functions, which can significantly outperform regular CROWN bounds. See [simple_verification.py](examples/vision/simple_verification.py#L59) for an example. (07/25/2021)
-- Handle split constraints for ReLU neurons ([β-CROWN](https://arxiv.org/pdf/2103.06624.pdf)) for complete verifiers. (07/25/2021)
+- Our neural network verification tool [α,β-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git) ([alpha-beta-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git)) **won** [VNN-COMP 2021](https://sites.google.com/view/vnn2021) **with the highest total score**, outperforming 11 SOTA verifiers. α,β-CROWN uses the `auto_LiRPA` library as its core bound computation library.
+- [Optimized CROWN/LiRPA](https://arxiv.org/pdf/2011.13824.pdf) bound (α-CROWN) for ReLU, **sigmoid**, **tanh**, and **maxpool** activation functions, which can significantly outperform regular CROWN bounds. See [simple_verification.py](examples/vision/simple_verification.py#L59) for an example. (07/31/2021)
+- Handle split constraints for ReLU neurons ([β-CROWN](https://arxiv.org/pdf/2103.06624.pdf)) for complete verifiers. (07/31/2021)
 - A memory efficient GPU implementation of backward (CROWN) bounds for 
 convolutional layers. (10/31/2020)
 - Certified defense models for downscaled
@@ -49,7 +50,7 @@ Our library supports the following algorithms:
 * Forward mode LiRPA bound propagation ([Xu et al., 2020](https://arxiv.org/pdf/2002.12920))
 * Forward mode LiRPA bound propagation with optimized bounds (similar to [α-CROWN](https://arxiv.org/pdf/2011.13824.pdf))
 * Interval bound propagation ([IBP](https://arxiv.org/pdf/1810.12715.pdf))
-* Hybrid approaches, e.g., Forward+Backward, IBP+Backward ([CROWN-IBP](https://arxiv.org/pdf/1906.06316.pdf))
+* Hybrid approaches, e.g., Forward+Backward, IBP+Backward ([CROWN-IBP](https://arxiv.org/pdf/1906.06316.pdf)), [α,β-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git) ([alpha-beta-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git))
 
 Our library allows automatic bound derivation and computation for general
 computational graphs, in a similar manner that gradients are obtained in modern
@@ -61,12 +62,38 @@ apply LiPRA as a tool for their own applications.  This is especially useful
 for users who are not experts of LiRPA and cannot derive these bounds manually
 (LiRPA is significantly more complicated than backpropagation).
 
+## Technical Background in 1 Minute
+
+Deep learning frameworks such as PyTorch represent neural networks (NN) as
+a computational graph, where each mathematical operation is a node and edges
+define the flow of computation:
+
+<p align="center">
+<a href="http://PaperCode.cc/AutoLiRPA-Video"><img src="http://www.huan-zhang.com/images/upload/lirpa/auto_LiRPA_background_1.png" width="80%"></a>
+</p>
+
+Normally, the inputs of a computation graph (which defines a NN) are data and
+model weights, and PyTorch goes through the graph and produces model prediction
+(a bunch of numbers):
+
+<p align="center">
+<a href="http://PaperCode.cc/AutoLiRPA-Video"><img src="http://www.huan-zhang.com/images/upload/lirpa/auto_LiRPA_background_2.png" width="80%"></a>
+</p>
+
+Our `auto_LiRPA` library conducts perturbation analysis on a computational
+graph, where the input data and model weights are defined within some
+user-defined ranges.  We get guaranteed output ranges (bounds):
+
+<p align="center">
+<a href="http://PaperCode.cc/AutoLiRPA-Video"><img src="http://www.huan-zhang.com/images/upload/lirpa/auto_LiRPA_background_3.png" width="80%"></a>
+</p>
+
 ## Installation
 
-Python 3.7+ is required. Pytorch 1.7 and 1.8 are currently supported.
-Before you run any examples, please install `auto_LiRPA` first:
+Python 3.7+ is required. Pytorch 1.8 (LTS) is recommended, although a newer
+version might also work. You can install `auto_LiRPA` via:
 
-```
+```bash
 git clone https://github.com/KaidiXu/auto_LiRPA
 cd auto_LiRPA
 python setup.py install
@@ -78,27 +105,27 @@ If you intend to modify this library, use `python setup.py develop` instead.
 
 First define your computation as a `nn.Module` and wrap it using
 `auto_LiRPA.BoundedModule()`. Then, you can call the `compute_bounds` function
-to obtain certified lower and upper bounds under perturbation:
+to obtain certified lower and upper bounds under input perturbations:
 
 ```python
 from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm
 
-# Define computation as a nn.Module
+# Define computation as a nn.Module.
 class MyModel(nn.Module):
     def forward(self, x):
-        # Define your computation here
+        # Define your computation here.
 
 model = MyModel()
 my_input = load_a_batch_of_data()
-# Wrap the model with auto_LiRPA
+# Wrap the model with auto_LiRPA.
 model = BoundedModule(model, my_input)
-# Define perturbation
+# Define perturbation. Here we add Linf perturbation to input data.
 ptb = PerturbationLpNorm(norm=np.inf, eps=0.1)
-# Make the input a BoundedTensor with perturbation
+# Make the input a BoundedTensor with the pre-defined perturbation.
 my_input = BoundedTensor(my_input, ptb)
 # Regular forward propagation using BoundedTensor works as usual.
 prediction = model(my_input)
-# Compute LiRPA bounds
+# Compute LiRPA bounds using the backward mode bound propagation (CROWN).
 lb, ub = model.compute_bounds(x=(my_input,), method="backward")
 ```
 
@@ -117,10 +144,10 @@ obtaining gradients through autodiff. Bounds are efficiently computed on GPUs.
 
 We provide a wide range of examples of using `auto_LiRPA`: 
 
-* [Bound Computation and **Robustness Verification** of Neural Networks](doc/examples.md#basic-bound-computation-and-robustness-verification-of-neural-networks)
+* [Basic Bound Computation and **Robustness Verification** of Neural Networks](doc/examples.md#basic-bound-computation-and-robustness-verification-of-neural-networks)
 * [Basic **Certified Adversarial Defense** Training](doc/examples.md#basic-certified-adversarial-defense-training)
 * [Large-scale Certified Defense Training on **ImageNet**](doc/examples.md#certified-adversarial-defense-on-downscaled-imagenet-and-tinyimagenet-with-loss-fusion)
-* [Certified Adversarial Defense with **LSTM**](doc/examples.md#certified-adversarial-defense-training-for-lstm-on-mnist)
+* [Certified Adversarial Defense Training on Sequence Data with **LSTM**](doc/examples.md#certified-adversarial-defense-training-for-lstm-on-mnist)
 * [Certifiably Robust Language Classifier using **Transformers**](doc/examples.md#certifiably-robust-language-classifier-with-transformer-and-lstm)
 * [Certified Robustness against **Model Weight Perturbations**](doc/examples.md#certified-robustness-against-model-weight-perturbations-and-certified-defense)
 
@@ -128,7 +155,7 @@ See also the [full documentation](https://auto-lirpa.readthedocs.io) with [API d
 
 ## Publications
 
-Please kindly cite our papers if you use the `auto_LiRPA` library. 
+Please kindly cite our papers if you use the `auto_LiRPA` library. Full [BibTeX entries](doc/examples.md#bibtex-entries) can be found [here](doc/examples.md#bibtex-entries).
 
 The general LiRPA based bound propagation algorithm was originally proposed in our paper:
 

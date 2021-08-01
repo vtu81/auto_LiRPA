@@ -1,3 +1,6 @@
+
+
+
 # Examples for auto\_LiRPA library
 
 We provide many [examples](examples) of using our `auto_LiRPA` library,
@@ -200,14 +203,18 @@ python train.py --model=lstm --load=ckpt_lstm --robust --method=IBP+backward
 
 ## Certified Robustness against Model Weight Perturbations and Certified Defense
 
-In our paper ([Xu et al. NeurIPS 2020](https://arxiv.org/pdf/2002.12920)), we
-provide an example for training a robust network under **weight perturbations**
-by applying LiRPA bounds on network weights rather than data inputs.
-Importantly, our algorithm considers general computational graphs, and model
-weights are also inputs of a computational graph, so LiRPA bounds can be
-naturally applied on weights.  This essentially obtains a network that has
-a "flat" optimization landscape (a small change in weight parameters do not
-change loss too much).
+In our paper ([Xu et al. 2020](https://arxiv.org/pdf/2002.12920)), we provide
+an example for training a robust network under **weight perturbations** by
+applying LiRPA bounds on network weights rather than data inputs.  Importantly,
+because our algorithm considers general computational graphs, and model weights
+are also inputs of a computational graph, LiRPA bounds can be naturally applied
+on model weights, immediately enabling **robustness certification and certified
+defense against model weight perturbations**. This also allows us to obtain a
+network that has a "flat" optimization landscape (a small change in weight
+parameters does not change the loss too much).
+
+The run robustness verification and certified defense for model weight
+perturbations, run the following code example:
 
 ```bash
 cd examples/vision
@@ -233,3 +240,32 @@ on implementing more primitive operations on computational graphs.  These
 operations are implemented in `auto_LiRPA/bound_ops.py`.  For example, if you
 add a custom activation function that is not supported by our framework, you
 can implement it in this file.
+
+## BibTeX Entries
+
+If you find our library useful, please kindly cite our papers:
+
+```
+@article{xu2020automatic,
+  title={Automatic perturbation analysis for scalable certified robustness and beyond},
+  author={Xu, Kaidi and Shi, Zhouxing and Zhang, Huan and Wang, Yihan and Chang, Kai-Wei and Huang, Minlie and Kailkhura, Bhavya and Lin, Xue and Hsieh, Cho-Jui},
+  journal={Advances in Neural Information Processing Systems},
+  volume={33},
+  year={2020}
+}
+
+@inproceedings{xu2021fast,
+    title={{Fast and Complete}: Enabling Complete Neural Network Verification with Rapid and Massively Parallel Incomplete Verifiers},
+    author={Kaidi Xu and Huan Zhang and Shiqi Wang and Yihan Wang and Suman Jana and Xue Lin and Cho-Jui Hsieh},
+    booktitle={International Conference on Learning Representations},
+    year={2021},
+    url={https://openreview.net/forum?id=nVZtXBI6LNn}
+}
+
+@article{wang2021beta,
+  title={{Beta-CROWN}: Efficient bound propagation with per-neuron split constraints for complete and incomplete neural network verification},
+  author={Wang, Shiqi and Zhang, Huan and Xu, Kaidi and Lin, Xue and Jana, Suman and Hsieh, Cho-Jui and Kolter, J Zico},
+  journal={arXiv preprint arXiv:2103.06624},
+  year={2021}
+}
+```

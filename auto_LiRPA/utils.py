@@ -10,6 +10,7 @@ from collections import defaultdict, Sequence, namedtuple
 from functools import reduce
 import operator
 import math
+import torch.nn.functional as F
 
 logging.basicConfig(
     format='%(levelname)-8s %(asctime)-12s %(message)s',
@@ -246,3 +247,11 @@ def patchesToMatrix(pieces, input_shape, stride, padding):
     return A_matrix
 
 
+def check_padding(x, padding):
+    if isinstance(padding, int):
+        return x, (padding, padding)
+    if len(padding) == 2:
+        return x, padding
+    if (padding[0] == padding[1]) and (padding[2] == padding[3]):
+        return x, (padding[0], padding[2])
+    return F.pad(x, padding), (0, 0)

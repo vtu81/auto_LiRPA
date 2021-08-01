@@ -3,6 +3,7 @@ import os
 import time
 from itertools import chain
 import numpy as np
+from numpy.lib.arraysetops import isin
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,7 +13,7 @@ import math
 from collections import OrderedDict
 
 from auto_LiRPA.perturbations import Perturbation, PerturbationLpNorm, PerturbationSynonym, PerturbationL0Norm
-from auto_LiRPA.utils import eyeC, OneHotC, LinearBound, user_data_dir, isnan, Patches, logger, Benchmarking, prod, batched_index_select, patchesToMatrix
+from auto_LiRPA.utils import eyeC, OneHotC, LinearBound, user_data_dir, isnan, Patches, logger, Benchmarking, prod, batched_index_select, patchesToMatrix, check_padding
 
 torch._C._jit_set_profiling_executor(False)
 torch._C._jit_set_profiling_mode(False)
@@ -366,7 +367,8 @@ class Bound(nn.Module):
             
             if self.batch_dim != -1:
                 batch_size = bias.shape[0]
-                bias = F.unfold(bias, kernel_size=A.patches.size(-1), stride=A.stride, padding=A.padding).transpose(-2, -1).unsqueeze(-2)
+                bias, padding = check_padding(bias, A.padding)
+                bias = F.unfold(bias, kernel_size=A.patches.size(-1), padding=padding, stride=A.stride).transpose(-2, -1).unsqueeze(-2)
                 # Here the size of bias is [batch_size, L, 1, in_c * K * K]
                 L = bias.size(1)
 
@@ -1234,8 +1236,6 @@ class BoundBatchNormalization(Bound):
             if last_A is None:
                 return None, 0
             if type(last_A) == torch.Tensor:
-                # import pdb;
-                # pdb.set_trace()
                 next_A = last_A * tmp_weight.view(*((1, 1, -1) + (1,) * (last_A.ndim - 3)))
                 if last_A.ndim > 3:
                     sum_bias = (last_A.sum(tuple(range(3, last_A.ndim))) * tmp_bias).sum(2)
@@ -1363,7 +1363,6 @@ class BoundConv(Bound):
                     sum_bias = 0
                 return next_A, sum_bias
             elif type(last_A) == Patches:
-                # import pdb; pdb.set_trace()
                 # Here we build and propagate a Patch object with (patches, stride, padding)
                 # shape of the patches is [batch_size, L, out_c, in_c, K * K]
 
@@ -1403,7 +1402,7 @@ class BoundConv(Bound):
                 if type(padding) == int:
                     padding = padding * self.stride[0] + self.padding[0]
                 else:
-                    padding = (p * self.stride[0] + self.padding[0] for p in padding)
+                    padding = tuple(p * self.stride[0] + self.padding[0] for p in padding)
                 stride *= self.stride[0]
 
                 if pieces.shape[-1] > self.input_shape[-1]: # the patches is too large and from now on, we will use matrix mode instead of patches mode.
@@ -1565,137 +1564,6 @@ class BoundConv(Bound):
     def infer_batch_dim(self, batch_size, *x):
         assert x[0] == 0
         return x[0]
-
-
-class BoundMaxPool(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
-        assert ('pads' not in attr) or (attr['pads'][0] == attr['pads'][2])
-        assert ('pads' not in attr) or (attr['pads'][1] == attr['pads'][3])
-
-        self.nonlinear = True
-        self.kernel_size = attr['kernel_shape']
-        self.stride = attr['strides']
-        self.padding = [attr['pads'][0], attr['pads'][1]]
-        # assert self.padding[0] == 0 and self.padding[1] == 0 # currently only support padding=0
-        self.ceil_mode = False
-        self.max_index = None
-        self.use_default_ibp = True
-        self.slope = None
-
-    @Bound.save_io_shape
-    def forward(self, x):
-        output, self.max_index = F.max_pool2d(x, self.kernel_size, self.stride, self.padding, return_indices=True, ceil_mode=self.ceil_mode)
-        return output
-
-    def project_simplex(self, patches):
-        # import pdb; pdb.set_trace()
-        sorted = torch.flatten(patches, -2)
-        sorted, _ = torch.sort(sorted, -1, descending=True)
-        rho_sum = torch.cumsum(sorted, -1)
-        rho_value = 1 - rho_sum
-        rho_value = (sorted + rho_value/torch.tensor(range(1, sorted.size(-1)+1), dtype=torch.float, device=sorted.device)) > 0
-        # print(rho_sum * rho_value)
-        # tmp = rho_sum * rho_value
-        _, rho_index = torch.max(torch.cumsum(rho_value, -1), -1)
-        # import pdb; pdb.set_trace()
-        rho_sum = torch.gather(rho_sum, -1, rho_index.unsqueeze(-1)).squeeze()
-        lbd = 1/(rho_index+1)* (1-rho_sum)
-
-        # index = torch.flatten(torch.clamp(patches + lbd.unsqueeze(-1).unsqueeze(-1), min=0), -2).sum(-1) > 2.0
-        # print(rho_value[index], tmp[index])
-        return torch.clamp(patches + lbd.unsqueeze(-1).unsqueeze(-1), min=0)
-
-    def _init_slope(self, x):
-        batch_size, channel, h, w = x.shape
-        o_h, o_w = self.output_shape[-2:]
-        self.slope = torch.ones((batch_size, channel, o_h, o_w, self.kernel_size[0], self.kernel_size[1]), dtype=torch.float, device=x.device)
-        self.slope.requires_grad_(True)
-
-
-    def bound_backward(self, last_lA, last_uA, x):
-        paddings = tuple(self.padding + self.padding)
-        # batch_size, input_c, x, y
-        upper_d = torch.zeros(([last_lA.shape[1]] + list(self.input_shape[1:]))).to(last_lA.device)
-        lower_d = torch.zeros(([last_lA.shape[1]] + list(self.input_shape[1:]))).to(last_lA.device)
-
-        upper_d = F.pad(upper_d, paddings)
-        lower_d = F.pad(lower_d, paddings)
-
-        # batch_size, output_c, x, y
-        upper_b = torch.zeros(([last_lA.shape[1]] + list(self.output_shape[1:]))).to(last_lA.device)
-        lower_b = torch.zeros(([last_lA.shape[1]] + list(self.output_shape[1:]))).to(last_lA.device)
-
-        # 1. find the index i where li > uj for all j, then set upper_d = lower_d = 1
-        max_lower, max_lower_index = F.max_pool2d(x.lower, self.kernel_size, self.stride, self.padding, return_indices=True, ceil_mode=self.ceil_mode)
-        delete_upper = torch.scatter(torch.flatten(F.pad(x.upper, paddings), -2), -1, torch.flatten(max_lower_index, -2), -np.inf).view(upper_d.shape)
-        max_upper, _ = F.max_pool2d(delete_upper, self.kernel_size, self.stride, 0, return_indices=True, ceil_mode=self.ceil_mode)
-        
-        values = torch.zeros_like(max_lower)
-        values[max_lower >= max_upper] = 1.0
-        upper_d = torch.scatter(torch.flatten(upper_d, -2), -1, torch.flatten(max_lower_index, -2), torch.flatten(values, -2)).view(upper_d.shape)
-
-        # TODO change to use BoundOptimzableActivation
-        if self.options.get('maxpool') == 'optimized':
-            if self.slope is None:
-                lower_d = torch.scatter(torch.flatten(lower_d, -2), -1, torch.flatten(max_lower_index, -2), 1.0).view(upper_d.shape)
-                lower_d_unfold = F.unfold(lower_d, self.kernel_size, 1, self.padding, self.stride)
-                self.slope = lower_d_unfold.view(lower_d.shape[0], lower_d.shape[1], self.kernel_size[0], self.kernel_size[1], self.output_shape[-2], self.output_shape[-1])
-                self.slope = self.slope.permute((0,1,4,5,2,3)).clone().detach()
-                self.slope.requires_grad_(True)
-            else:
-                self.slope.data = self.project_simplex(self.slope.data).clone().detach()
-                slope = self.slope.permute((0,1,4,5,2,3))
-                slope_shape = slope.shape
-                slope = slope.view((slope_shape[0], -1, slope_shape[-2]*slope_shape[-1]))
-                lower_d = F.fold(slope, self.input_shape[-2:], self.kernel_size, 1, self.padding, self.stride)
-        else:
-            lower_d = torch.scatter(torch.flatten(lower_d, -2), -1, torch.flatten(max_lower_index, -2), 1.0).view(upper_d.shape)
-
-        values[:] = 0.0
-        max_upper_, _ = F.max_pool2d(x.upper, self.kernel_size, self.stride, self.padding, return_indices=True, ceil_mode=self.ceil_mode)
-        values[max_upper > max_lower] = max_upper_[max_upper > max_lower]
-        upper_b = values
-
-        assert type(last_lA) == torch.Tensor, type(last_uA) == torch.Tensor
-        def _bound_oneside(last_A, d_pos, d_neg, b_pos, b_neg):
-            if last_A is None:
-                return None, 0
-            pos_A = last_A.clamp(min=0)
-            neg_A = last_A.clamp(max=0)
-
-            bias = 0
-            if b_pos is not None:
-                bias = bias + self.get_bias(pos_A, b_pos)
-            if b_neg is not None:
-                bias = bias + self.get_bias(neg_A, b_neg)
-
-            shape = last_A.size()
-            pos_A = F.interpolate(pos_A.view(shape[0] * shape[1], *shape[2:]), scale_factor=self.kernel_size)
-            pos_A = F.pad(pos_A, (0, self.input_shape[-2] - pos_A.shape[-2], 0, self.input_shape[-1] - pos_A.shape[-1]))
-            pos_A = pos_A.view(shape[0], shape[1], *pos_A.shape[1:])
-
-            neg_A = F.interpolate(neg_A.view(shape[0] * shape[1], *shape[2:]), scale_factor=self.kernel_size)
-            neg_A = F.pad(neg_A, (0, self.input_shape[-2] - neg_A.shape[-2], 0, self.input_shape[-1] - neg_A.shape[-1]))
-            neg_A = neg_A.view(shape[0], shape[1], *neg_A.shape[1:])
-
-            next_A = torch.zeros((list(last_A.shape[:2]) + list(self.input_shape[1:]))).to(last_A.device)
-            next_A = pos_A * d_pos + neg_A * d_neg
-            return next_A, bias
-
-        upper_d = upper_d[...,self.padding[0]:-self.padding[0], self.padding[0]:-self.padding[0]]
-        lower_d = lower_d[...,self.padding[0]:-self.padding[0], self.padding[0]:-self.padding[0]]
-
-        uA, ubias = _bound_oneside(last_uA, upper_d, lower_d, upper_b, lower_b)
-        lA, lbias = _bound_oneside(last_lA, lower_d, upper_d, lower_b, upper_b)
-
-        return [(lA, uA)], lbias, ubias
-
-    def infer_batch_dim(self, batch_size, *x):
-        assert x[0] == 0
-        return 0
-
-
 class BoundAveragePool(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         # assumptions: ceil_mode=False, count_include_pad=True
@@ -1979,7 +1847,10 @@ class BoundPad(Bound):
                 return None
             assert type(last_A) is Patches or last_A.ndim == 5
             if type(last_A) is Patches:
-                new_padding = (last_A.padding + left, last_A.padding + right, last_A.padding + top, last_A.padding + bottom)
+                if isinstance(last_A.padding, tuple):
+                    new_padding = (last_A.padding[0] + left, last_A.padding[1] + right, last_A.padding[2] + top, last_A.padding[3] + bottom)
+                else:
+                    new_padding = (last_A.padding + left, last_A.padding + right, last_A.padding + top, last_A.padding + bottom)
                 return Patches(last_A.patches, last_A.stride, new_padding, last_A.shape, last_A.identity)
             else:
                 shape = last_A.size()
@@ -2227,21 +2098,13 @@ class BoundRelu(BoundOptimizableActivation):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.options = options
-        self.relu_options = options.get('relu')
-        # FIXME: using hierarchical options.
-
-        self.slope = None
-
+        self.relu_options = options.get('relu', 'adaptive')
         self.beta = self.beta_mask = self.masked_beta = self.sparse_beta = None
-
         self.split_beta_used = False
         self.history_beta_used = False
         self.flattened_nodes = None
         # Save patches size for each output node.
         self.patch_size = {}
-
-    def clean_slope(self):
-        self.slope = None
 
     def init_opt_parameters(self, start_nodes):
         self.alpha = OrderedDict()
@@ -2255,12 +2118,8 @@ class BoundRelu(BoundOptimizableActivation):
     @Bound.save_io_shape
     def forward(self, x):
         self.shape = x.shape[1:]
-        if self.opt_stage is not None:
-            if self.slope is None:
-                self._init_slope(x, both_sides=self.opt_stage is not None)
-            if self.flattened_nodes is None:
-                self.flattened_nodes = x[0].reshape(-1).shape[0]
-
+        if self.flattened_nodes is None:
+            self.flattened_nodes = x[0].reshape(-1).shape[0]
         return F.relu(x)
 
     # Linear relaxation for nonlinear functions
@@ -2347,6 +2206,7 @@ class BoundRelu(BoundOptimizableActivation):
         elif self.relu_options == "reversed-adaptive":
             lower_d = (upper_d < 0.5).float()
         elif self.opt_stage == 'opt':
+            # Alpha-CROWN.
             lower_d = None
             # Each alpha has shape (2, output_shape, batch_size, *relu_node_shape].
             if unstable_idx is not None:
@@ -2427,8 +2287,10 @@ class BoundRelu(BoundOptimizableActivation):
                     d_neg = d_neg.view(-1, *d_neg_shape[2:])
 
                     # unfold the slope matrix as patches
-                    d_pos_unfolded = F.unfold(d_pos, kernel_size=last_A.patches.size(-1), padding=last_A.padding, stride=last_A.stride)
-                    d_neg_unfolded = F.unfold(d_neg, kernel_size=last_A.patches.size(-1), padding=last_A.padding, stride=last_A.stride)
+                    d_pos, padding_p = check_padding(d_pos, last_A.padding)
+                    d_neg, padding_n = check_padding(d_neg, last_A.padding)
+                    d_pos_unfolded = F.unfold(d_pos, kernel_size=last_A.patches.size(-1), stride=last_A.stride, padding=padding_p)
+                    d_neg_unfolded = F.unfold(d_neg, kernel_size=last_A.patches.size(-1), stride=last_A.stride, padding=padding_n)
 
 
                     # Reshape the unfolded patches as [batch_size, L, spec_size, in_c, H, W]; here spec_size is out_c.
@@ -2469,8 +2331,8 @@ class BoundRelu(BoundOptimizableActivation):
 
         self.masked_beta_lower = self.masked_beta_upper = None
         if self.options.get('optimize_bound_args', {}).get('ob_beta', False):
-            # old single node split. The beta is for a single specification, lower bound only.
             if self.options.get('optimize_bound_args', {}).get('ob_single_node_split', False):
+                # Beta-CROWN.
                 A = last_uA if last_uA is not None else last_lA
                 if type(A) is Patches:
                     # For patches mode, masked_beta will be used; sparse beta is not supported.
@@ -2501,7 +2363,7 @@ class BoundRelu(BoundOptimizableActivation):
                         lA = lA.view(prev_size)
                 else:
                     raise RuntimeError(f"Unknown type {type(A)} for A")
-            # bab general
+            # The code block below is for debugging and will be removed (until the end of this function).
             elif not self.options.get('optimize_bound_args', {}).get('ob_single_node_split', True):
                 A = uA if uA is not None else lA
                 if type(A) == torch.Tensor:
@@ -2557,7 +2419,6 @@ class BoundRelu(BoundOptimizableActivation):
                                 lA = lA.view(prev_size)
                         else:
                             self.masked_beta_lower = self.masked_beta_upper = self.masked_beta = self.beta * self.beta_mask
-                    # print(self.beta, self.beta_mask)
 
                     ############################
                     # sparse_coo version for history coeffs
@@ -2594,20 +2455,7 @@ class BoundRelu(BoundOptimizableActivation):
                             # new_history_beta has shape (batch, m_max_history_beta)
                             self.masked_beta_lower = self.masked_beta_upper = torch.bmm(self.new_history_coeffs, (
                                         self.new_history_beta * self.new_history_c).unsqueeze(-1)).squeeze(-1)
-                        # history_compute_time = time.time()-history_compute_time
 
-                        # history_compute_time1 = time.time()
-                        # history_compute_time = time.time()-history_compute_time
-
-                        # history_compute_time1 = time.time()
-                        # tmp = (self.new_history_beta*self.new_history_c).unsqueeze(-1)
-                        # history_compute_time1 = time.time()-history_compute_time1
-                        # history_compute_time2 = time.time()
-                        # self.masked_beta = torch.bmm(self.new_history_coeffs, tmp).squeeze(-1)
-                        # history_compute_time2 = time.time()-history_compute_time2
-                    ############################
-
-                    ############################
                     # new split constraint
                     if self.split_beta_used:
                         split_convert_time = time.time()
@@ -2739,10 +2587,6 @@ class BoundRelu(BoundOptimizableActivation):
 
         h_L, h_U = v[0][0], v[0][1]
 
-        if self.opt_stage is not None:
-            if self.slope is None:
-                self._init_slope(h_U)
-
         return F.relu(h_L), F.relu(h_U)
 
     def bound_forward(self, dim_in, x):
@@ -2753,7 +2597,6 @@ class BoundTanh(BoundOptimizableActivation):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.precompute_relaxation('tanh', torch.tanh, self.dtanh)
-        self.option = options.get('tanh')
 
     def opt_init(self):
         super().opt_init()
@@ -2934,7 +2777,6 @@ class BoundSigmoid(BoundTanh):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super(BoundTanh, self).__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.precompute_relaxation('sigmoid', torch.sigmoid, self.dsigmoid)
-        self.option = options.get('sigmoid', False)
 
     @Bound.save_io_shape
     def forward(self, x):
@@ -4570,3 +4412,140 @@ class BoundFlatten(Bound):
 
         return [(_bound_oneside(last_lA), _bound_oneside(last_uA)), (None, None)], 0, 0
 
+
+class BoundMaxPool(BoundOptimizableActivation):
+    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
+        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+        assert ('pads' not in attr) or (attr['pads'][0] == attr['pads'][2])
+        assert ('pads' not in attr) or (attr['pads'][1] == attr['pads'][3])
+
+        self.nonlinear = True
+        self.kernel_size = attr['kernel_shape']
+        self.stride = attr['strides']
+        self.padding = [attr['pads'][0], attr['pads'][1]]
+        # assert self.padding[0] == 0 and self.padding[1] == 0 # currently only support padding=0
+        self.ceil_mode = False
+        self.use_default_ibp = True
+        self.alpha = None
+        self.init = {}
+
+    @Bound.save_io_shape
+    def forward(self, x):
+        output, _ = F.max_pool2d(x, self.kernel_size, self.stride, self.padding, return_indices=True, ceil_mode=self.ceil_mode)
+        return output
+
+    def project_simplex(self, patches):
+        sorted = torch.flatten(patches, -2)
+        sorted, _ = torch.sort(sorted, -1, descending=True)
+        rho_sum = torch.cumsum(sorted, -1)
+        rho_value = 1 - rho_sum
+        rho_value = (sorted + rho_value/torch.tensor(range(1, sorted.size(-1)+1), dtype=torch.float, device=sorted.device)) > 0
+        _, rho_index = torch.max(torch.cumsum(rho_value, -1), -1)
+        rho_sum = torch.gather(rho_sum, -1, rho_index.unsqueeze(-1)).squeeze(-1)
+        lbd = 1/(rho_index+1)* (1-rho_sum)
+
+        return torch.clamp(patches + lbd.unsqueeze(-1).unsqueeze(-1), min=0)
+
+    def init_opt_parameters(self, start_nodes):
+        batch_size, channel, h, w = self.input_shape
+        o_h, o_w = self.output_shape[-2:]
+        # batch_size, out_c, out_h, out_w, k, k
+
+        self.alpha = OrderedDict()
+        ref = self.inputs[0].lower # a reference variable for getting the shape
+        for ns, size_s in start_nodes:
+            self.alpha[ns] = torch.empty([1, size_s, self.input_shape[0], self.input_shape[1], self.output_shape[-2], self.output_shape[-1], self.kernel_size[0], self.kernel_size[1]], 
+                dtype=torch.float, device=ref.device, requires_grad=True)
+            self.init[ns] = False
+
+
+
+    def bound_backward(self, last_lA, last_uA, x, start_node=None, start_shape=None):
+        paddings = tuple(self.padding + self.padding)
+
+        A_shape = last_lA.shape if last_lA is not None else last_uA.shape
+        # batch_size, input_c, x, y
+        upper_d = torch.zeros((list(self.input_shape)), device=x.device)
+        lower_d = torch.zeros((list(self.input_shape)), device=x.device)
+
+        upper_d = F.pad(upper_d, paddings)
+        lower_d = F.pad(lower_d, paddings)
+
+        # batch_size, output_c, x, y
+        upper_b = torch.zeros((list(self.output_shape)), device=x.device)
+        lower_b = torch.zeros((list(self.output_shape)), device=x.device)
+
+        # 1. find the index i where li > uj for all j, then set upper_d = lower_d = 1
+        max_lower, max_lower_index = F.max_pool2d(x.lower, self.kernel_size, self.stride, self.padding, return_indices=True, ceil_mode=self.ceil_mode)
+        delete_upper = torch.scatter(torch.flatten(F.pad(x.upper, paddings), -2), -1, torch.flatten(max_lower_index, -2), -np.inf).view(upper_d.shape)
+        max_upper, _ = F.max_pool2d(delete_upper, self.kernel_size, self.stride, 0, return_indices=True, ceil_mode=self.ceil_mode)
+        
+        values = torch.zeros_like(max_lower)
+        values[max_lower >= max_upper] = 1.0
+        upper_d = torch.scatter(torch.flatten(upper_d, -2), -1, torch.flatten(max_lower_index, -2), torch.flatten(values, -2)).view(upper_d.shape)
+
+        if self.opt_stage == 'opt':
+            alpha = self.alpha[start_node.name]
+            if self.init[start_node.name] == False:
+                lower_d = torch.scatter(torch.flatten(lower_d, -2), -1, torch.flatten(max_lower_index, -2), 1.0).view(upper_d.shape)
+                lower_d_unfold = F.unfold(lower_d, self.kernel_size, 1, stride=self.stride)
+
+                alpha_data = lower_d_unfold.view(lower_d.shape[0], lower_d.shape[1], self.kernel_size[0], self.kernel_size[1], self.output_shape[-2], self.output_shape[-1])
+                alpha.data.copy_(alpha_data.permute((0,1,4,5,2,3)).clone().detach())
+                self.init[start_node.name] = True
+                if self.padding[0] > 0:
+                    lower_d = lower_d[...,self.padding[0]:-self.padding[0], self.padding[0]:-self.padding[0]]
+
+            alpha.data = self.project_simplex(alpha.data).clone().detach()
+            alpha = alpha.permute((0,1,2,3,6,7,4,5))
+            alpha_shape = alpha.shape
+            alpha = alpha.reshape((alpha_shape[0]*alpha_shape[1]*alpha_shape[2], -1, alpha_shape[-2]*alpha_shape[-1]))
+            lower_d = F.fold(alpha, self.input_shape[-2:], self.kernel_size, 1, self.padding, self.stride)
+            lower_d = lower_d.view(alpha_shape[0], alpha_shape[1], alpha_shape[2], *lower_d.shape[1:])
+            lower_d = lower_d.squeeze(0)
+        else:
+            lower_d = torch.scatter(torch.flatten(lower_d, -2), -1, torch.flatten(max_lower_index, -2), 1.0).view(upper_d.shape)
+            if self.padding[0] > 0:
+                lower_d = lower_d[...,self.padding[0]:-self.padding[0], self.padding[0]:-self.padding[0]]
+
+        values[:] = 0.0
+        max_upper_, _ = F.max_pool2d(x.upper, self.kernel_size, self.stride, self.padding, return_indices=True, ceil_mode=self.ceil_mode)
+        values[max_upper > max_lower] = max_upper_[max_upper > max_lower]
+        upper_b = values
+
+        assert type(last_lA) == torch.Tensor or type(last_uA) == torch.Tensor
+        def _bound_oneside(last_A, d_pos, d_neg, b_pos, b_neg):
+            if last_A is None:
+                return None, 0
+            pos_A = last_A.clamp(min=0)
+            neg_A = last_A.clamp(max=0)
+
+            bias = 0
+            if b_pos is not None:
+                bias = bias + self.get_bias(pos_A, b_pos)
+            if b_neg is not None:
+                bias = bias + self.get_bias(neg_A, b_neg)
+
+            shape = last_A.size()
+            pos_A = F.interpolate(pos_A.view(shape[0] * shape[1], *shape[2:]), scale_factor=self.kernel_size)
+            pos_A = F.pad(pos_A, (0, self.input_shape[-2] - pos_A.shape[-2], 0, self.input_shape[-1] - pos_A.shape[-1]))
+            pos_A = pos_A.view(shape[0], shape[1], *pos_A.shape[1:])
+
+            neg_A = F.interpolate(neg_A.view(shape[0] * shape[1], *shape[2:]), scale_factor=self.kernel_size)
+            neg_A = F.pad(neg_A, (0, self.input_shape[-2] - neg_A.shape[-2], 0, self.input_shape[-1] - neg_A.shape[-1]))
+            neg_A = neg_A.view(shape[0], shape[1], *neg_A.shape[1:])
+
+            next_A = pos_A * d_pos + neg_A * d_neg
+            return next_A, bias
+
+        if self.padding[0] > 0:
+            upper_d = upper_d[...,self.padding[0]:-self.padding[0], self.padding[0]:-self.padding[0]]
+
+        uA, ubias = _bound_oneside(last_uA, upper_d, lower_d, upper_b, lower_b)
+        lA, lbias = _bound_oneside(last_lA, lower_d, upper_d, lower_b, upper_b)
+
+        return [(lA, uA)], lbias, ubias
+
+    def infer_batch_dim(self, batch_size, *x):
+        assert x[0] == 0
+        return 0

@@ -18,7 +18,7 @@ class Model(nn.Module):
   def __init__(self):
     super(Model, self).__init__()
     self.n_n_conv2d = nn.Conv2d(**{'groups': 1, 'dilation': [1, 1], 'out_channels': 32, 'padding': [0, 0], 'kernel_size': (2, 2), 'stride': [1, 1], 'in_channels': 1, 'bias': True})
-    self.n_n_average_pooling2d = nn.AvgPool2d(**{'kernel_size': [4, 4], 'ceil_mode': False, 'stride': [4, 4], 'count_include_pad': True, 'padding': [0, 0]})
+    self.n_n_average_pooling2d = nn.MaxPool2d(**{'kernel_size': [4, 4], 'ceil_mode': False, 'stride': [4, 4], 'padding': [0, 0]})
     self.n_n_flatten_Flatten = nn.Flatten(**{'start_dim': 1})
     self.n_n_dense = nn.Conv2d(**{'groups': 1, 'dilation': [1, 1], 'out_channels': 10, 'padding': [0, 0], 'kernel_size': (1, 1), 'stride': [1, 1], 'in_channels': 1152, 'bias': True})
     self.n_n_activation_Flatten = nn.Flatten(**{'start_dim': 1})
@@ -55,6 +55,7 @@ class TestConv(TestCase):
         N = 2
         n_classes = 10
         image = data['input']
+        # image = torch.rand([N,1,28,28])
         # image = image.to(torch.float32) / 255.0
 
         model = BoundedModule(model_ori, image, device="cpu", bound_opts={"conv_mode": "matrix"})
@@ -70,6 +71,8 @@ class TestConv(TestCase):
 
         assert torch.allclose(lb, lb_ref, 1e-4)
         assert torch.allclose(ub, ub_ref, 1e-4)
+
+        # lb, ub = model.compute_bounds(x=(image,), method="CROWN-Optimized")
 
         # torch.save({'input': image, 'model': model_ori.state_dict(), 'lb': lb, 'ub': ub}, 'data/maxpool_test_data')
 
