@@ -1592,8 +1592,8 @@ class BoundedModule(nn.Module):
                                             reduced_dim = True
                                             # print(f'layer {node.name} total {dim} unstable {max_non_zero} newC {newC.size()}')
                                         else:
-                                            if dim > 1000:
-                                                warnings.warn(f"Creating an identity matrix with size {dim}x{dim} for node {node}. This may indicate poor performance for bound computation. If you see this message on a small network please submit a bug report.", stacklevel=2)
+                                            # if dim > 1000:
+                                                # warnings.warn(f"Creating an identity matrix with size {dim}x{dim} for node {node}. This may indicate poor performance for bound computation. If you see this message on a small network please submit a bug report.", stacklevel=2)
                                             newC = torch.eye(dim, device=self.device) \
                                                 .unsqueeze(0).repeat(batch_size, 1, 1) \
                                                 .view(batch_size, dim, *node.output_shape[1:])
