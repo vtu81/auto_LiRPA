@@ -1299,7 +1299,7 @@ class BoundedModule(nn.Module):
     def compute_bounds(self, x=None, aux=None, C=None, method='backward', IBP=False, forward=False, 
                        bound_lower=True, bound_upper=True, reuse_ibp=False,
                        return_A=False, needed_A_list=None, final_node_name=None, average_A=False, new_interval=None,
-                       return_b=False, b_dict=None, reference_bounds=None, intermediate_constr=None, alpha_idx=None, return_Ab=False):
+                       return_b=False, b_dict=None, reference_bounds=None, intermediate_constr=None, alpha_idx=None, cert_backdoor=False):
         r"""Main function for computing bounds.
 
         Args:
@@ -1645,7 +1645,7 @@ class BoundedModule(nn.Module):
             # This is for the final output bound. No need to pass in intermediate layer beta constraints.
             return self._backward_general(C=C, node=final, root=root, bound_lower=bound_lower, bound_upper=bound_upper,
                                           return_A=return_A, needed_A_list=needed_A_list, average_A=average_A, A_dict=A_dict,
-                                          return_b=return_b, b_dict=b_dict, unstable_idx=alpha_idx, return_Ab=return_Ab)
+                                          return_b=return_b, b_dict=b_dict, unstable_idx=alpha_idx, cert_backdoor=cert_backdoor)
         elif method == 'forward':
             return self._forward_general(C=C, node=final, root=root, dim_in=dim_in, concretize=True)
         else:
@@ -1745,7 +1745,7 @@ class BoundedModule(nn.Module):
         return node.interval
 
     def _backward_general(self, C=None, node=None, root=None, bound_lower=True, bound_upper=True,
-                          return_A=False, needed_A_list=None, average_A=False, A_dict=None, return_b=False, b_dict=None, intermediate_constr=None, unstable_idx=None, return_Ab=False):
+                          return_A=False, needed_A_list=None, average_A=False, A_dict=None, return_b=False, b_dict=None, intermediate_constr=None, unstable_idx=None, cert_backdoor=False):
         logger.debug('Backward from ({})[{}]'.format(node, node.name))
         _print_time = False
 
@@ -2029,14 +2029,17 @@ class BoundedModule(nn.Module):
             # A_dict.update({node.name: this_A_dict})
             A_dict.update({node.name: A_record})
 
-        if return_Ab:
+        if cert_backdoor:
             nodes = []
             # return root and b
             for i in range(len(root)):
                 if root[i].lA is None and root[i].uA is None: continue
                 nodes.append(root[i]) # only append useful nodes
-            return nodes, lb, ub
-
+            # return nodes, lb, ub
+            ori_lb = lb.detach().cpu()
+            ori_ub = ub.detach().cpu()
+            ub_lower = ub
+        
         for i in range(len(root)):
             if root[i].lA is None and root[i].uA is None: continue
             # FIXME maybe this one is broken after moving the output dimension to the first
@@ -2056,6 +2059,9 @@ class BoundedModule(nn.Module):
                 uA = root[i].uA.reshape(output_dim, batch_size, -1).transpose(0, 1) if bound_upper else None
             if hasattr(root[i], 'perturbation') and root[i].perturbation is not None:
                 if isinstance(root[i], BoundParams):
+                    if cert_backdoor: # an auxilary for certifying backdoors
+                        ub_lower = ub_lower + root[i].perturbation.concretize(root[i].center, uA, sign=-1,
+                                                                        aux=root[i].aux) if bound_upper else None
                     # add batch_size dim for weights node
                     lb = lb + root[i].perturbation.concretize(
                         root[i].center.unsqueeze(0), lA,
@@ -2064,6 +2070,9 @@ class BoundedModule(nn.Module):
                         root[i].center.unsqueeze(0), uA,
                         sign=+1, aux=root[i].aux) if bound_upper else None
                 else:
+                    if cert_backdoor: # an auxilary for certifying backdoors
+                        ub_lower = ub_lower + root[i].perturbation.concretize(root[i].center, uA, sign=-1,
+                                                                        aux=root[i].aux) if bound_upper else None
                     lb = lb + root[i].perturbation.concretize(root[i].center, lA, sign=-1,
                                                               aux=root[i].aux) if bound_lower else None
                     ub = ub + root[i].perturbation.concretize(root[i].center, uA, sign=+1,
@@ -2090,8 +2099,10 @@ class BoundedModule(nn.Module):
                     ub = ub + uA.matmul(root[i].forward_value.view(-1, 1)).squeeze(-1) if bound_upper else None
         node.lower = lb.view(batch_size, *output_shape) if bound_lower else None
         node.upper = ub.view(batch_size, *output_shape) if bound_upper else None
+        if cert_backdoor: ub_lower = ub_lower.view(batch_size, *output_shape) if bound_upper else None
 
         if return_A: return node.lower, node.upper, A_dict
+        if cert_backdoor: return node.lower, node.upper, ub_lower, nodes, ori_lb, ori_ub
         return node.lower, node.upper
 
     def _forward_general(self, C=None, node=None, root=None, dim_in=None, concretize=False):
