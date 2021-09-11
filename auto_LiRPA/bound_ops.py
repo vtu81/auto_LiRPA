@@ -2164,7 +2164,7 @@ class BoundRelu(BoundOptimizableActivation):
         self._add_linear(mask=self.mask_both, type='lower',
                          k=lower_k, x0=0., y0=0.)
 
-    def bound_backward(self, last_lA, last_uA, x=None, start_node=None, beta_for_intermediate_layers=False, unstable_idx=None):
+    def bound_backward(self, last_lA, last_uA, x=None, start_node=None, beta_for_intermediate_layers=False, unstable_idx=None, split_mask=None):
         if x is not None:
             # # only set lower and upper bound here when using neuron set version, ie, not ob_update_by_layer
             # if self.beta is not None and not self.options.get('optimize_bound_args', {}).get('ob_update_by_layer', False):
@@ -2181,6 +2181,12 @@ class BoundRelu(BoundOptimizableActivation):
 
         self.I = ((lb_r != 0) * (ub_r != 0)).detach()  # unstable neurons
         # print('unstable neurons:', self.I.sum())
+
+        # print("lb_r:", lb_r, "\nub_r:", ub_r)
+        if split_mask is not None:
+            lb_r[split_mask > 0] = 0 # positive split: assure lower bound >=0
+            ub_r[split_mask < 0] = 0 # negative split: assure upper bound <=0
+        # print("lb_r:", lb_r, "\nub_r:", ub_r)
 
         if hasattr(x, 'interval') and Interval.use_relative_bounds(x.interval):
             diff_x = x.interval.upper_offset - x.interval.lower_offset

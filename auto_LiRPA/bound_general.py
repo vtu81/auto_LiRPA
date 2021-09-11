@@ -1299,7 +1299,7 @@ class BoundedModule(nn.Module):
     def compute_bounds(self, x=None, aux=None, C=None, method='backward', IBP=False, forward=False, 
                        bound_lower=True, bound_upper=True, reuse_ibp=False,
                        return_A=False, needed_A_list=None, final_node_name=None, average_A=False, new_interval=None,
-                       return_b=False, b_dict=None, reference_bounds=None, intermediate_constr=None, alpha_idx=None, cert_backdoor=False):
+                       return_b=False, b_dict=None, reference_bounds=None, intermediate_constr=None, alpha_idx=None, cert_backdoor=False, relu_split_mask=None):
         r"""Main function for computing bounds.
 
         Args:
@@ -1645,7 +1645,7 @@ class BoundedModule(nn.Module):
             # This is for the final output bound. No need to pass in intermediate layer beta constraints.
             return self._backward_general(C=C, node=final, root=root, bound_lower=bound_lower, bound_upper=bound_upper,
                                           return_A=return_A, needed_A_list=needed_A_list, average_A=average_A, A_dict=A_dict,
-                                          return_b=return_b, b_dict=b_dict, unstable_idx=alpha_idx, cert_backdoor=cert_backdoor)
+                                          return_b=return_b, b_dict=b_dict, unstable_idx=alpha_idx, cert_backdoor=cert_backdoor, relu_split_mask=relu_split_mask)
         elif method == 'forward':
             return self._forward_general(C=C, node=final, root=root, dim_in=dim_in, concretize=True)
         else:
@@ -1745,7 +1745,7 @@ class BoundedModule(nn.Module):
         return node.interval
 
     def _backward_general(self, C=None, node=None, root=None, bound_lower=True, bound_upper=True,
-                          return_A=False, needed_A_list=None, average_A=False, A_dict=None, return_b=False, b_dict=None, intermediate_constr=None, unstable_idx=None, cert_backdoor=False):
+                          return_A=False, needed_A_list=None, average_A=False, A_dict=None, return_b=False, b_dict=None, intermediate_constr=None, unstable_idx=None, cert_backdoor=False, relu_split_mask=None):
         logger.debug('Backward from ({})[{}]'.format(node, node.name))
         _print_time = False
 
@@ -1888,7 +1888,7 @@ class BoundedModule(nn.Module):
 
                 if isinstance(l, BoundRelu):
                     A, lower_b, upper_b = l.bound_backward(l.lA, l.uA, *input_nodes, start_node=node, unstable_idx=unstable_idx,
-                                                           beta_for_intermediate_layers=intermediate_constr is not None)  # TODO: unify this interface.
+                                                           beta_for_intermediate_layers=intermediate_constr is not None, split_mask=relu_split_mask[l.name] if relu_split_mask is not None else None)  # TODO: unify this interface.
                 elif isinstance(l, BoundOptimizableActivation):
                     A, lower_b, upper_b = l.bound_backward(l.lA, l.uA, *input_nodes, 
                     start_shape=(prod(node.output_shape[1:]) if node.name != self.final_name
