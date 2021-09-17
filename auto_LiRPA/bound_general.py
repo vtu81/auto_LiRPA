@@ -636,7 +636,7 @@ class BoundedModule(nn.Module):
             node.init_opt_parameters(start_nodes)
             node.opt_start()
 
-        print("alpha-CROWN optimizable variables initialized.")
+        # print("alpha-CROWN optimizable variables initialized.")
 
     def beta_bias(self):
         batch_size = len(self.relus[-1].split_beta)
@@ -1299,7 +1299,7 @@ class BoundedModule(nn.Module):
     def compute_bounds(self, x=None, aux=None, C=None, method='backward', IBP=False, forward=False, 
                        bound_lower=True, bound_upper=True, reuse_ibp=False,
                        return_A=False, needed_A_list=None, final_node_name=None, average_A=False, new_interval=None,
-                       return_b=False, b_dict=None, reference_bounds=None, intermediate_constr=None, alpha_idx=None, cert_backdoor=False):
+                       return_b=False, b_dict=None, reference_bounds=None, intermediate_constr=None, alpha_idx=None, cert_backdoor=False, opt_backdoor=False):
         r"""Main function for computing bounds.
 
         Args:
@@ -1645,7 +1645,7 @@ class BoundedModule(nn.Module):
             # This is for the final output bound. No need to pass in intermediate layer beta constraints.
             return self._backward_general(C=C, node=final, root=root, bound_lower=bound_lower, bound_upper=bound_upper,
                                           return_A=return_A, needed_A_list=needed_A_list, average_A=average_A, A_dict=A_dict,
-                                          return_b=return_b, b_dict=b_dict, unstable_idx=alpha_idx, cert_backdoor=cert_backdoor)
+                                          return_b=return_b, b_dict=b_dict, unstable_idx=alpha_idx, cert_backdoor=cert_backdoor, opt_backdoor=opt_backdoor)
         elif method == 'forward':
             return self._forward_general(C=C, node=final, root=root, dim_in=dim_in, concretize=True)
         else:
@@ -1745,7 +1745,7 @@ class BoundedModule(nn.Module):
         return node.interval
 
     def _backward_general(self, C=None, node=None, root=None, bound_lower=True, bound_upper=True,
-                          return_A=False, needed_A_list=None, average_A=False, A_dict=None, return_b=False, b_dict=None, intermediate_constr=None, unstable_idx=None, cert_backdoor=False):
+                          return_A=False, needed_A_list=None, average_A=False, A_dict=None, return_b=False, b_dict=None, intermediate_constr=None, unstable_idx=None, cert_backdoor=False, opt_backdoor=False):
         logger.debug('Backward from ({})[{}]'.format(node, node.name))
         _print_time = False
 
@@ -2029,13 +2029,23 @@ class BoundedModule(nn.Module):
             # A_dict.update({node.name: this_A_dict})
             A_dict.update({node.name: A_record})
 
+        # Optimized cert_backdoor doesn't need concrete bounds.
+        # Since the gradients relationships are useful, we return the current lA, uA, lb, ub directly.
+        if opt_backdoor:
+            nodes = []
+            # return root and b
+            for i in range(len(root)):
+                if root[i].lA is None and root[i].uA is None: continue
+                nodes.append(root[i]) # only append useful nodes
+            return nodes, lb, ub
+
         if cert_backdoor:
             nodes = []
             # return root and b
             for i in range(len(root)):
                 if root[i].lA is None and root[i].uA is None: continue
                 nodes.append(root[i]) # only append useful nodes
-            # return nodes, lb, ub
+            # save a detached version of current lb, ub
             ori_lb = lb.detach().cpu()
             ori_ub = ub.detach().cpu()
             ub_lower = ub
